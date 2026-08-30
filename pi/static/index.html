@@ -1,0 +1,407 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>envlog</title>
+<!-- Inline, so the browser stops requesting /favicon.ico and 404ing. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext y='14' font-size='14'%3E%F0%9F%8C%A1%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/vendor/uPlot.min.css">
+<style>
+  :root {
+    --bg:#11141a; --panel:#1a1f29; --line:#2a3140; --text:#e6e9ef; --dim:#98a2b3;
+    --accent:#4c8dff; --warn:#ff6b6b; --ok:#4ade80;
+  }
+  * { box-sizing:border-box }
+  body { margin:0; font:14px/1.5 system-ui,-apple-system,Segoe UI,sans-serif;
+         background:var(--bg); color:var(--text) }
+  header { display:flex; flex-wrap:wrap; gap:16px; align-items:baseline;
+           padding:14px 18px; border-bottom:1px solid var(--line); background:var(--panel) }
+  h1 { font-size:16px; margin:0; letter-spacing:.02em }
+  .liveness { font-variant-numeric:tabular-nums }
+  .liveness.stale { color:var(--warn); font-weight:600 }
+  .liveness.live { color:var(--ok) }
+  .where { color:var(--dim) }
+  .spacer { flex:1 }
+  main { padding:18px; display:grid; gap:18px; max-width:1100px; margin:0 auto }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px }
+  .panel h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em;
+              color:var(--dim); margin:0 0 10px }
+  /* CSS uppercasing turns the micro sign into Greek capital Mu, which reads as
+     "Mg/m³" -- a thousandfold error in the unit. Units opt out. */
+  .panel h2 .unit { text-transform:none }
+  select, input, button { font:inherit; color:inherit; background:#0d1015;
+      border:1px solid var(--line); border-radius:6px; padding:6px 8px }
+  button { background:var(--accent); border-color:transparent; color:#fff; cursor:pointer }
+  button.secondary { background:#232a36; color:var(--text) }
+  button:disabled { opacity:.5; cursor:default }
+  .row { display:flex; flex-wrap:wrap; gap:8px; align-items:center }
+  .ranges button { background:#232a36; color:var(--text) }
+  .ranges button[aria-pressed="true"] { background:var(--accent); color:#fff }
+  /* Placement timeline: one band per placement, so a move is visible at a glance
+     and the charts below can be read against it. */
+  .timeline { display:flex; height:26px; border-radius:6px; overflow:hidden; margin-top:6px }
+  .band { position:relative; display:flex; align-items:center; justify-content:center;
+          font-size:11px; white-space:nowrap; overflow:hidden; color:#0d1015; font-weight:600 }
+  .band .settling { position:absolute; inset:0 auto 0 0; background:repeating-linear-gradient(
+      45deg, rgba(0,0,0,.28) 0 4px, transparent 4px 8px) }
+  table { width:100%; border-collapse:collapse; font-size:13px }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:middle }
+  th { color:var(--dim); font-weight:500 }
+  td input, td select { width:100% }
+  .msg { padding:8px 10px; border-radius:6px; margin-top:10px; display:none }
+  .msg.show { display:block }
+  .msg.err { background:#3a1d22; color:#ffb4b4 }
+  .msg.ok { background:#1d3a29; color:#b4ffd0 }
+  .chart { width:100% }
+  .empty { color:var(--dim); padding:20px 0; text-align:center }
+  .u-legend { font-size:12px }
+</style>
+
+<header>
+  <h1>envlog</h1>
+  <span class="liveness" id="liveness">…</span>
+  <span class="where" id="where"></span>
+  <span class="spacer"></span>
+  <span class="ranges row" id="ranges"></span>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>Placement</h2>
+    <div class="row">
+      <select id="roomPick"></select>
+      <input id="roomNew" placeholder="or a new room" size="14">
+      <input id="moveNote" placeholder="note, e.g. on the windowsill" size="22">
+      <button id="moveBtn">Move it here</button>
+    </div>
+    <div class="timeline" id="timeline"></div>
+    <div class="msg" id="moveMsg"></div>
+  </section>
+
+  <section class="panel"><h2>CO₂ <span class="unit">(ppm)</span></h2><div class="chart" id="c-co2"></div></section>
+  <section class="panel"><h2>Temperature <span class="unit">(°C)</span></h2><div class="chart" id="c-temp"></div></section>
+  <section class="panel"><h2>Relative humidity <span class="unit">(%)</span></h2><div class="chart" id="c-rh"></div></section>
+  <section class="panel"><h2>Pressure <span class="unit">(hPa)</span></h2><div class="chart" id="c-press"></div></section>
+  <section class="panel"><h2>Particulates <span class="unit">(µg/m³)</span></h2><div class="chart" id="c-pm"></div></section>
+
+  <section class="panel">
+    <h2>Placement history</h2>
+    <table id="placements"><tbody></tbody></table>
+    <div class="msg" id="histMsg"></div>
+  </section>
+</main>
+
+<script src="/static/vendor/uPlot.iife.min.js"></script>
+<script>
+// Auth rides on the cookie the server set at login, so fetch needs no header.
+// credentials:'same-origin' is the default, but it is stated here because the
+// whole dashboard silently 401s without it.
+const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+const METRICS = ["co2_ppm","bme_temp_c","scd_temp_c","bme_rh_pct","scd_rh_pct",
+                 "pressure_hpa","pm1_0_atm","pm2_5_atm","pm10_atm"];
+
+// Ranges carry their own bucket: raw 45-second data over 30 days is ~58k points,
+// which is a slow chart and an unreadable one.
+const RANGES = [
+  { label:"6h",  seconds:6*3600,      bucket:"60"   },
+  { label:"24h", seconds:24*3600,     bucket:"300"  },
+  { label:"7d",  seconds:7*86400,     bucket:"1800" },
+  { label:"30d", seconds:30*86400,    bucket:"7200" },
+  { label:"1y",  seconds:365*86400,   bucket:"day"  },
+];
+let range = RANGES[1];
+
+const SETTLING_SECONDS = 600;  // BME280 thermalising, PM fan spinning up
+const STALE_AFTER = 180;       // ~4 missed 45s samples
+const BAND_COLOURS = ["#4c8dff","#4ade80","#fbbf24","#f472b6","#22d3ee","#a78bfa"];
+
+const $ = (id) => document.getElementById(id);
+const charts = {};
+
+async function api(path, options) {
+  const res = await fetch(path, { credentials:"same-origin", ...options });
+  if (res.status === 401) { location.reload(); throw new Error("unauthorized"); }
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+  return body;
+}
+
+function say(el, text, kind) {
+  el.textContent = text;
+  el.className = `msg show ${kind}`;
+  if (kind === "ok") setTimeout(() => { el.className = "msg"; }, 4000);
+}
+
+function ago(seconds) {
+  if (seconds < 90) return `${seconds}s ago`;
+  if (seconds < 5400) return `${Math.round(seconds/60)} min ago`;
+  if (seconds < 172800) return `${(seconds/3600).toFixed(1)} h ago`;
+  return `${Math.round(seconds/86400)} days ago`;
+}
+
+// ---------------------------------------------------------------- rendering
+
+/* One flat [xs, ...ys] per chart, with a null row inserted between placements.
+   uPlot leaves a gap wherever y is null, which is what makes a move break the
+   line instead of drawing a slope between two rooms that never happened. */
+function toData(segments, wanted, columns) {
+  const idx = wanted.map(m => columns.indexOf(m));
+  const xs = [], ys = wanted.map(() => []);
+  segments.forEach((seg, i) => {
+    if (i > 0 && seg.rows.length) {
+      xs.push(seg.rows[0][0] - 0.5);
+      ys.forEach(a => a.push(null));
+    }
+    for (const row of seg.rows) {
+      xs.push(row[0]);
+      idx.forEach((c, j) => ys[j].push(c < 0 ? null : row[c]));
+    }
+  });
+  return [xs, ...ys];
+}
+
+/* The null gap between placements is one bucket wide, which at chart scale is a
+   pixel or two -- technically a break, visually nothing. These dashed rules make
+   each move legible, and line up with the placement bands above. */
+function boundaryMarkers(getBoundaries) {
+  return { hooks: { draw: (u) => {
+    const bounds = getBoundaries();
+    if (!bounds.length) return;
+    const ctx = u.ctx;
+    ctx.save();
+    ctx.strokeStyle = "#7d879b";
+    ctx.setLineDash([3, 3]);
+    ctx.lineWidth = 1;
+    for (const ts of bounds) {
+      const x = Math.round(u.valToPos(ts, "x", true)) + 0.5;
+      if (x < u.bbox.left || x > u.bbox.left + u.bbox.width) continue;
+      ctx.beginPath();
+      ctx.moveTo(x, u.bbox.top);
+      ctx.lineTo(x, u.bbox.top + u.bbox.height);
+      ctx.stroke();
+    }
+    ctx.restore();
+  } } };
+}
+
+let moveBoundaries = [];
+
+function makeChart(el, labels, colours, data) {
+  const opts = {
+    width: el.clientWidth || 800,
+    height: 200,
+    cursor: { y:false },
+    scales: { x:{ time:true } },
+    plugins: [ boundaryMarkers(() => moveBoundaries) ],
+    axes: [
+      { stroke:"#98a2b3", grid:{ stroke:"#232a36" }, ticks:{ stroke:"#232a36" } },
+      { stroke:"#98a2b3", grid:{ stroke:"#232a36" }, ticks:{ stroke:"#232a36" } },
+    ],
+    series: [
+      {},
+      ...labels.map((label, i) => ({
+        label, stroke: colours[i], width: 1.6,
+        spanGaps: false,          // a NULL is a gap, never a connected line
+        value: (u, v) => v == null ? "–" : v.toFixed(1),
+      })),
+    ],
+  };
+  return new uPlot(opts, data, el);
+}
+
+function drawChart(key, el, labels, colours, series) {
+  const data = toData(series.segments, labels.map(l => l.metric), series.columns);
+  const hasAny = data.slice(1).some(a => a.some(v => v != null));
+  if (!hasAny) {
+    el.innerHTML = '<div class="empty">No readings in this range.</div>';
+    if (charts[key]) { charts[key].destroy(); delete charts[key]; }
+    return;
+  }
+  if (charts[key]) { charts[key].destroy(); delete charts[key]; }
+  el.innerHTML = "";
+  charts[key] = makeChart(el, labels.map(l => l.label), colours, data);
+}
+
+function drawTimeline(segments, from, to) {
+  const el = $("timeline");
+  el.innerHTML = "";
+  const span = to - from;
+  if (!segments.length || span <= 0) return;
+  segments.forEach((seg, i) => {
+    if (!seg.rows.length) return;
+    const start = seg.rows[0][0];
+    const end = i + 1 < segments.length ? segments[i+1].rows[0][0] : to;
+    const band = document.createElement("div");
+    band.className = "band";
+    band.style.flexGrow = String(Math.max(end - start, 1));
+    band.style.background = BAND_COLOURS[i % BAND_COLOURS.length];
+    band.textContent = seg.location + (seg.note ? ` — ${seg.note}` : "");
+    band.title = `${seg.location}: ${new Date(start*1000).toLocaleString()}`;
+    // The first few minutes are the sensor settling, not the room.
+    const settle = document.createElement("div");
+    settle.className = "settling";
+    settle.style.width = `${Math.min(100, 100 * SETTLING_SECONDS / Math.max(end-start,1))}%`;
+    settle.title = "settling: BME280 thermalising, PM fan spinning up";
+    band.appendChild(settle);
+    el.appendChild(band);
+  });
+}
+
+// ------------------------------------------------------------------ loading
+
+async function refreshStatus() {
+  const s = await api("/api/status");
+  const el = $("liveness");
+  if (s.last_ts == null) {
+    el.textContent = "no readings yet";
+    el.className = "liveness stale";
+  } else {
+    el.textContent = `last seen ${ago(s.seconds_since_last)}`;
+    el.className = "liveness " + (s.seconds_since_last > STALE_AFTER ? "stale" : "live");
+  }
+  $("where").textContent = s.placement
+    ? `in the ${s.placement.room}${s.placement.note ? ` (${s.placement.note})` : ""}`
+    : "location unrecorded";
+}
+
+async function refreshSeries() {
+  const to = Math.floor(Date.now()/1000);
+  const from = to - range.seconds;
+  const q = new URLSearchParams({
+    metrics: METRICS.join(","), from, to, bucket: range.bucket, tz: TZ,
+  });
+  const series = await api(`/api/series?${q}`);
+  moveBoundaries = series.segments
+    .slice(1)
+    .filter(s => s.rows.length)
+    .map(s => s.rows[0][0]);
+  drawTimeline(series.segments, from, to);
+  drawChart("co2", $("c-co2"), [{metric:"co2_ppm", label:"CO₂"}], ["#4ade80"], series);
+  drawChart("temp", $("c-temp"),
+    [{metric:"bme_temp_c", label:"BME280"}, {metric:"scd_temp_c", label:"SCD-41"}],
+    ["#4c8dff","#fbbf24"], series);
+  drawChart("rh", $("c-rh"),
+    [{metric:"bme_rh_pct", label:"BME280"}, {metric:"scd_rh_pct", label:"SCD-41"}],
+    ["#4c8dff","#fbbf24"], series);
+  drawChart("press", $("c-press"), [{metric:"pressure_hpa", label:"Pressure"}],
+    ["#22d3ee"], series);
+  drawChart("pm", $("c-pm"),
+    [{metric:"pm1_0_atm", label:"PM1.0"}, {metric:"pm2_5_atm", label:"PM2.5"},
+     {metric:"pm10_atm", label:"PM10"}],
+    ["#a78bfa","#f472b6","#fb923c"], series);
+}
+
+async function refreshRooms() {
+  const { rooms } = await api("/rooms");
+  const pick = $("roomPick");
+  const current = pick.value;
+  pick.innerHTML = rooms.length
+    ? rooms.map(r => `<option>${r.name}</option>`).join("")
+    : '<option value="">— no rooms yet —</option>';
+  if (current) pick.value = current;
+  return rooms;
+}
+
+async function refreshPlacements() {
+  const { placements } = await api("/placements");
+  const rooms = await refreshRooms();
+  const body = $("placements").querySelector("tbody");
+  if (!placements.length) {
+    body.innerHTML = '<tr><td class="empty">Nothing recorded yet. '
+      + 'Use “Move it here” above so readings stop accumulating as Unknown.</td></tr>';
+    return;
+  }
+  const local = (ts) => ts == null ? "" :
+    new Date(ts*1000 - new Date().getTimezoneOffset()*60000).toISOString().slice(0,16);
+  body.innerHTML =
+    "<tr><th>Room</th><th>From</th><th>Until</th><th>Note</th><th></th></tr>" +
+    placements.map(p => `
+      <tr data-id="${p.id}">
+        <td><select class="p-room">${
+          rooms.map(r => `<option${r.name===p.room?" selected":""}>${r.name}</option>`).join("")
+        }</select></td>
+        <td><input class="p-start" type="datetime-local" value="${local(p.start_ts)}"></td>
+        <td><input class="p-end" type="datetime-local" value="${local(p.end_ts)}"></td>
+        <td><input class="p-note" value="${p.note ? p.note.replace(/"/g,"&quot;") : ""}"></td>
+        <td><button class="secondary p-save">Save</button></td>
+      </tr>`).join("");
+}
+
+async function refreshAll() {
+  try {
+    await Promise.all([refreshStatus(), refreshSeries(), refreshPlacements()]);
+  } catch (err) {
+    say($("histMsg"), `Could not load: ${err.message}`, "err");
+  }
+}
+
+// ------------------------------------------------------------------- events
+
+$("ranges").innerHTML = RANGES.map((r, i) =>
+  `<button data-i="${i}" aria-pressed="${r===range}">${r.label}</button>`).join("");
+$("ranges").addEventListener("click", (ev) => {
+  const btn = ev.target.closest("button");
+  if (!btn) return;
+  range = RANGES[+btn.dataset.i];
+  [...$("ranges").children].forEach(b => b.setAttribute("aria-pressed", b === btn));
+  refreshSeries().catch(err => say($("histMsg"), err.message, "err"));
+});
+
+$("moveBtn").addEventListener("click", async () => {
+  const room = ($("roomNew").value.trim() || $("roomPick").value || "").trim();
+  if (!room) { say($("moveMsg"), "Name a room first.", "err"); return; }
+  $("moveBtn").disabled = true;
+  try {
+    await api("/placements", {
+      method:"POST",
+      headers:{ "Content-Type":"application/json" },
+      body: JSON.stringify({ node:"feather-01", room, note: $("moveNote").value.trim() || null }),
+    });
+    $("roomNew").value = ""; $("moveNote").value = "";
+    say($("moveMsg"), `Recorded: now in the ${room}.`, "ok");
+    await refreshAll();
+  } catch (err) {
+    say($("moveMsg"), err.message, "err");
+  } finally {
+    $("moveBtn").disabled = false;
+  }
+});
+
+$("placements").addEventListener("click", async (ev) => {
+  const btn = ev.target.closest(".p-save");
+  if (!btn) return;
+  const tr = btn.closest("tr");
+  const epoch = (sel) => {
+    const v = tr.querySelector(sel).value;
+    return v ? Math.floor(new Date(v).getTime()/1000) : null;
+  };
+  btn.disabled = true;
+  try {
+    await api(`/placements/${tr.dataset.id}`, {
+      method:"PATCH",
+      headers:{ "Content-Type":"application/json" },
+      body: JSON.stringify({
+        room: tr.querySelector(".p-room").value,
+        start_ts: epoch(".p-start"),
+        end_ts: epoch(".p-end"),
+        note: tr.querySelector(".p-note").value.trim() || null,
+      }),
+    });
+    say($("histMsg"), "Saved. Charts relabel themselves from here.", "ok");
+    await refreshAll();
+  } catch (err) {
+    say($("histMsg"), err.message, "err");
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+let resizeTimer;
+addEventListener("resize", () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => refreshSeries().catch(() => {}), 200);
+});
+
+refreshAll();
+setInterval(() => refreshStatus().catch(() => {}), 20000);
+setInterval(() => refreshSeries().catch(() => {}), 60000);
+</script>

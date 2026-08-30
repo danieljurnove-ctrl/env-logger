@@ -339,3 +339,47 @@ def test_status_on_a_fresh_install_is_not_an_error(client):
     body = resp.get_json()
     assert body["node"] is None
     assert body["last_ts"] is None
+
+
+# ------------------------------------------------------- browser auth + assets
+
+
+def test_root_without_a_token_offers_the_login_form(client):
+    resp = client.get("/")
+    assert resp.status_code == 401
+    assert b"<form" in resp.data and b"/login" in resp.data
+
+
+def test_login_with_the_wrong_token_is_rejected(client):
+    resp = client.post("/login", data={"token": "nope"})
+    assert resp.status_code == 401
+    assert b"not accepted" in resp.data
+
+
+def test_login_sets_a_cookie_and_the_dashboard_then_loads(client):
+    resp = client.post("/login", data={"token": TOKEN})
+    assert resp.status_code == 302
+    assert "envlog_token" in resp.headers.get("Set-Cookie", "")
+    page = client.get("/")           # cookie is on the test client now
+    assert page.status_code == 200
+    assert b"uPlot.iife.min.js" in page.data
+
+
+def test_token_in_the_query_string_is_exchanged_for_a_cookie(client):
+    """It must not stay in the URL, where history and proxy logs would keep it."""
+    resp = client.get(f"/?token={TOKEN}")
+    assert resp.status_code == 302
+    assert resp.headers["Location"] in ("/", "http://localhost/")
+    assert "envlog_token" in resp.headers.get("Set-Cookie", "")
+
+
+def test_static_assets_are_not_an_unauthenticated_back_door(client):
+    assert client.get("/static/vendor/uPlot.min.css").status_code == 401
+    client.post("/login", data={"token": TOKEN})
+    assert client.get("/static/vendor/uPlot.min.css").status_code == 200
+
+
+def test_rooms_lists_the_preset_names(client):
+    client.post("/placements", headers=AUTH, json={"node": "feather-01", "room": "study"})
+    body = client.get("/rooms", headers=AUTH).get_json()
+    assert [r["name"] for r in body["rooms"]] == ["study"]

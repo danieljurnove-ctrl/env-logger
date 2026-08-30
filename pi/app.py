@@ -23,10 +23,18 @@ from datetime import datetime
 from functools import wraps
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from flask import Flask, current_app, g, jsonify, request
+from flask import (
+    Flask, current_app, g, jsonify, redirect, request, send_from_directory
+)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCHEMA_PATH = os.path.join(HERE, "schema.sql")
+STATIC_DIR = os.path.join(HERE, "static")
+
+# A browser navigating to / cannot set an X-Auth-Token header, so the token is
+# also accepted once as ?token=... and then remembered in this cookie. Same
+# secret, same constant-time comparison -- only the transport differs.
+COOKIE_NAME = "envlog_token"
 
 # Column -> plausible range. Anything outside is a sensor fault or a wiring
 # mistake, not a reading; see _validate for why it NULLs the column rather than
@@ -104,19 +112,56 @@ def _get_or_create(conn: sqlite3.Connection, table: str, name: str) -> int:
 # ------------------------------------------------------------------------ auth
 
 
+def _presented_token() -> str:
+    """The token as offered by whichever transport the caller has.
+
+    The node sends a header. A browser cannot, when it is following a link, so
+    it may hand the token over once in the query string and thereafter carry the
+    cookie the server sets. All three are the same secret.
+    """
+    header = request.headers.get("X-Auth-Token")
+    if header:
+        return header
+    query = request.args.get("token")
+    if query:
+        return query
+    return request.cookies.get(COOKIE_NAME, "")
+
+
+def _token_ok() -> bool:
+    # compare_digest rather than == so the comparison is not timing-variable.
+    return hmac.compare_digest(
+        _presented_token(), current_app.config["ENVLOG_TOKEN"]
+    )
+
+
+def _remember_token(response):
+    """Persist the token so the dashboard keeps working across page loads.
+
+    HttpOnly because no script needs to read it. Not Secure: docs/design.md rules
+    out TLS here deliberately, and a Secure cookie over plain HTTP is simply
+    never stored, which would break the dashboard rather than protect it.
+    """
+    response.set_cookie(
+        COOKIE_NAME,
+        current_app.config["ENVLOG_TOKEN"],
+        max_age=365 * 24 * 3600,
+        httponly=True,
+        samesite="Lax",
+    )
+    return response
+
+
 def _require_token(view):
     """Auth on every endpoint, not just /ingest.
 
     A tailnet is a flat network: every device and user on it can otherwise read
-    the dashboard. compare_digest rather than == so the comparison is not
-    timing-variable.
+    the dashboard.
     """
 
     @wraps(view)
     def wrapper(*args, **kwargs):
-        expected = current_app.config["ENVLOG_TOKEN"]
-        presented = request.headers.get("X-Auth-Token", "")
-        if not hmac.compare_digest(presented, expected):
+        if not _token_ok():
             return jsonify(error="unauthorized"), 401
         return view(*args, **kwargs)
 
@@ -389,11 +434,19 @@ def _segment(entries, metrics):
 
 
 def create_app(db_path=None, token=None, flush_interval=None, start_flusher=True):
-    app = Flask(__name__)
-    app.config["ENVLOG_DB"] = db_path or os.environ.get(
-        "ENVLOG_DB", "/var/lib/envlog/envlog.db"
+    # static_folder=None: Flask's built-in /static route bypasses view decorators,
+    # which would leave the one set of unauthenticated endpoints in the service.
+    app = Flask(__name__, static_folder=None)
+    # `is None` rather than `or`: an explicitly passed empty token must NOT fall
+    # through to the environment, or the refuse-to-start guard below can be
+    # bypassed by whatever happens to be exported in the shell.
+    app.config["ENVLOG_DB"] = (
+        db_path if db_path is not None
+        else os.environ.get("ENVLOG_DB", "/var/lib/envlog/envlog.db")
     )
-    app.config["ENVLOG_TOKEN"] = token or os.environ.get("ENVLOG_TOKEN", "")
+    app.config["ENVLOG_TOKEN"] = (
+        token if token is not None else os.environ.get("ENVLOG_TOKEN", "")
+    )
     # A body cap costs nothing and is the one real protection here; docs/design.md
     # explains why TLS on the LAN would be theatre and this is not.
     app.config["MAX_CONTENT_LENGTH"] = 16 * 1024
@@ -676,20 +729,64 @@ def create_app(db_path=None, token=None, flush_interval=None, start_flusher=True
             segments=_segment(entries, metrics),
         )
 
-    @app.get("/")
+    @app.get("/rooms")
     @_require_token
+    def list_rooms():
+        """The picker's preset list. Free text would split 'bedroom' and
+        'Bedroom' into two rooms and two halves of every chart."""
+        conn = _get_db()
+        rows = conn.execute("SELECT id, name FROM rooms ORDER BY name").fetchall()
+        return jsonify(rooms=[dict(r) for r in rows])
+
+    @app.get("/static/<path:filename>")
+    @_require_token
+    def static_file(filename: str):
+        return send_from_directory(STATIC_DIR, filename)
+
+    @app.post("/login")
+    def login():
+        """Exchange the token for a cookie, so the dashboard survives a reload."""
+        presented = request.form.get("token", "")
+        if not hmac.compare_digest(presented, app.config["ENVLOG_TOKEN"]):
+            return _login_page("That token was not accepted."), 401
+        return _remember_token(redirect("/"))
+
+    @app.get("/")
     def dashboard():
-        # Roadmap item 5. Kept behind the same auth as everything else so it does
-        # not become the one unauthenticated endpoint when it lands.
-        return (
-            "<!doctype html><meta charset=utf-8><title>envlog</title>"
-            "<p>envlog ingest is running. The dashboard is roadmap item 5; "
-            "until then see <code>/api/series</code> and <code>/api/status</code>.</p>",
-            200,
-            {"Content-Type": "text/html; charset=utf-8"},
-        )
+        if request.args.get("token") and _token_ok():
+            # Strip the token back out of the URL so it stops living in browser
+            # history, bookmarks and any proxy log between here and the browser.
+            return _remember_token(redirect("/"))
+        if not _token_ok():
+            return _login_page(), 401
+        return send_from_directory(STATIC_DIR, "index.html")
 
     return app
+
+
+def _login_page(message: str = "") -> str:
+    note = f'<p class="err">{message}</p>' if message else ""
+    return f"""<!doctype html><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>envlog</title>
+<link rel="icon" href="data:,">
+<style>
+  body {{ font: 15px/1.5 system-ui, sans-serif; background:#11141a; color:#e6e9ef;
+         display:grid; place-items:center; height:100vh; margin:0 }}
+  form {{ background:#1a1f29; padding:24px; border-radius:10px; width:min(90vw,340px) }}
+  h1 {{ font-size:16px; margin:0 0 12px }}
+  input {{ width:100%; padding:8px; border-radius:6px; border:1px solid #333b4a;
+           background:#0d1015; color:inherit; font:inherit; box-sizing:border-box }}
+  button {{ margin-top:12px; width:100%; padding:8px; border:0; border-radius:6px;
+            background:#4c8dff; color:#fff; font:inherit; cursor:pointer }}
+  .err {{ color:#ff6b6b; margin:0 0 12px }}
+</style>
+<form method=post action=/login>
+  <h1>envlog</h1>
+  {note}
+  <input name=token type=password placeholder="Ingest token" autofocus>
+  <button type=submit>Open dashboard</button>
+</form>"""
 
 
 def main() -> None:  # pragma: no cover - process entry point

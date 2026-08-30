@@ -13,11 +13,25 @@ how to install and run it.
 | `backup.sh` | Nightly `VACUUM INTO` + copy off-box |
 | `simulate_node.py` | Fake node, for driving the stack without hardware |
 | `test_app.py` | Test suite, including the placement-overlap invariant |
+| `install.sh` | Idempotent installer for the Pi |
+| `static/` | The dashboard, plus vendored uPlot |
 | `systemd/` | Service and backup timer units |
 
 ---
 
 ## Install on the Pi
+
+The short way, from a checkout on the Pi:
+
+```sh
+sudo bash pi/install.sh
+```
+
+It is safe to re-run — it never overwrites an existing token and never touches the database. It
+prints the token and the dashboard URL when it finishes.
+
+<details>
+<summary>Or by hand</summary>
 
 ```sh
 sudo mkdir -p /opt/envlog /var/lib/envlog /etc/envlog
@@ -44,6 +58,8 @@ sudo cp systemd/*.service systemd/*.timer /etc/systemd/system/
 sudo systemctl enable --now envlog.service envlog-backup.timer
 ```
 
+</details>
+
 ### Configuration
 
 | Variable | Default | Meaning |
@@ -68,7 +84,9 @@ Every one of them requires `X-Auth-Token`. A tailnet is a flat network.
 | `PATCH` | `/placements/:id` | Retroactive correction |
 | `GET` | `/api/status` | Liveness: last reading, seconds since, current room |
 | `GET` | `/api/series` | Chart data, segmented by placement |
-| `GET` | `/` | Dashboard (roadmap item 5; a placeholder for now) |
+| `GET` | `/rooms` | The room preset list |
+| `GET` | `/` | The dashboard |
+| `POST` | `/login` | Exchanges the token for a cookie |
 
 `/api/series` takes `node`, `metrics` (comma-separated column names), `from`, `to` (unix
 seconds), `tz` (IANA name), and `bucket` — an integer number of seconds, or `day` for local
@@ -77,6 +95,22 @@ calendar days in `tz`.
 Its `segments` array holds one entry per placement, so **a move breaks the line** rather than
 drawing a slope between two rooms that never happened. Unlabelled periods come back as
 `"Unknown"` rather than disappearing.
+
+---
+
+## The dashboard
+
+Open `http://envlog.home:8000/` and paste the token once. A browser cannot send an
+`X-Auth-Token` header when you follow a link, so the token is exchanged for an HttpOnly cookie
+and remembered; `http://envlog.home:8000/?token=...` works too and immediately redirects to strip
+the token back out of the URL.
+
+It shows liveness in the header, a room timeline with the settling period hatched, five charts,
+a move control, and an editable placement history. Moves appear as dashed vertical rules on every
+chart and break the line, so a trend is never drawn across two different rooms.
+
+uPlot is vendored in `static/vendor/` rather than loaded from a CDN — the Pi may have no route to
+the internet, and the dashboard has to work when it doesn't.
 
 ---
 
