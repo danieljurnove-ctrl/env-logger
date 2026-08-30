@@ -17,8 +17,10 @@ over SSH. Two consequences worth knowing before they bite:
   will not run them — a CRLF shebang fails with `bad interpreter: /bin/bash^M`, and a CRLF unit
   file fails to parse. The `.gitattributes` in this repo forces LF on checkout, so anything that
   travels through git is safe. Files copied by other means are not; check them.
-- **USB serial driver.** Flashing the Feather V2 from Windows needs the SiLabs **CP2104** driver.
-  Install it before arrival day — it is a reboot you do not want to discover mid-bring-up.
+- **USB serial driver.** The Feather V2's USB-to-serial chip is a **CH9102F** — not the CP2104 of
+  the older Huzzah32, so the SiLabs driver is the wrong one. Windows 11 sometimes picks the chip
+  up through Windows Update; when it doesn't, the board enumerates as an unknown device and no COM
+  port appears. Install WCH's **CH343SER** package (it covers the CH9102) before arrival day.
 
 Copy to the Pi with `scp`, which ships with Windows' built-in OpenSSH client. `rsync` does not.
 
