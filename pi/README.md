@@ -14,6 +14,7 @@ how to install and run it.
 | `simulate_node.py` | Fake node, for driving the stack without hardware |
 | `test_app.py` | Test suite, including the placement-overlap invariant |
 | `install.sh` | Idempotent installer for the Pi |
+| `deploy.sh` | Pushes this directory to the Pi from the dev machine, then runs `install.sh` there |
 | `static/` | The dashboard, plus vendored uPlot |
 | `systemd/` | Service and backup timer units |
 
@@ -29,6 +30,20 @@ sudo bash pi/install.sh
 
 It is safe to re-run — it never overwrites an existing token and never touches the database. It
 prints the token and the dashboard URL when it finishes.
+
+### From the development machine
+
+`install.sh` assumes a checkout is already on the Pi. `deploy.sh` is what puts one there: it runs
+on the laptop, ships this directory over SSH, and then invokes `install.sh` remotely.
+
+```sh
+pi/deploy.sh                 # sync, install, restart, verify
+pi/deploy.sh --logs          # ... then tail the journal
+pi/deploy.sh --restart-only  # restart and health-check only, ship nothing
+```
+
+Setup, and the security tradeoff in letting anything deploy unattended, are in
+[docs/remote-control.md](../docs/remote-control.md).
 
 <details>
 <summary>Or by hand</summary>

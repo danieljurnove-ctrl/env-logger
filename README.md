@@ -74,6 +74,7 @@ hardware doc:
 | `docs/hardware.md` | Bill of materials, pinouts, wiring, sensor gotchas |
 | `docs/design.md` | Schema, storage decisions, API contract, and why |
 | `docs/bring-up.md` | Ordered checklist for the day the parts arrive |
+| `docs/remote-control.md` | Driving the Pi over SSH from the development machine |
 | `esphome/` | Node firmware config (not yet written) |
 | `pi/` | Ingest service, schema, dashboard, systemd units |
 

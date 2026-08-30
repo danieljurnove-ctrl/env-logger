@@ -34,4 +34,5 @@ jobs:
         run: |
           bash -n pi/backup.sh
           bash -n pi/install.sh
-          shellcheck pi/backup.sh pi/install.sh
+          bash -n pi/deploy.sh
+          shellcheck pi/backup.sh pi/install.sh pi/deploy.sh
