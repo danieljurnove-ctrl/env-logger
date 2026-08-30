@@ -1,0 +1,124 @@
+# env-logger
+
+Home air quality and environmental logging. A portable WiFi sensor node carried from room to
+room posts readings to an always-on Raspberry Pi, which stores them in SQLite and serves trend
+graphs viewable from anywhere over Tailscale.
+
+> **Status: parts ordered 2026-08-30, not yet arrived.** This repo currently contains
+> documentation and structure only. No application code has been written. See
+> [docs/bring-up.md](docs/bring-up.md) for what happens when the box shows up.
+
+---
+
+## Architecture
+
+```
+[ ESP32 Feather V2 + BME280 + SCD-41 + PMS5003 ]   portable, USB-C powered
+     │  HTTP POST JSON, X-Auth-Token header
+     │  only sensors with a fresh reading; the rest are omitted → NULL
+     │  target: http://envlog.home:8000/ingest
+     ▼
+[ Raspberry Pi 2B — fixed, wired Ethernet, 1 GB ]
+     ├─ Pi-hole            :53 + its own web UI     (pre-existing, untouched)
+     ├─ envlog ingest      :8000  Flask + waitress
+     │     ├─ POST  /ingest          auth → validate → buffer → batched write
+     │     ├─ POST  /placements      "I moved it to the bedroom"
+     │     ├─ PATCH /placements/:id  retroactive correction
+     │     ├─ GET   /api/series      JSON for the dashboard
+     │     └─ GET   /                self-contained HTML dashboard
+     ├─ SQLite  /var/lib/envlog/envlog.db   (WAL, batched ~1 write/min)
+     ├─ nightly VACUUM INTO + rsync off-box
+     └─ Tailscale          remote access via the Pi's tailnet IP
+```
+
+No Grafana. A 1 GB Pi 2B already running Pi-hole has no room for another 150–280 MB of RSS, so
+the ingest service serves its own dashboard page instead.
+
+**Firmware is built on a laptop, not on the Pi.** ESPHome requires Python ≥3.12 (Raspberry Pi OS
+Bookworm ships 3.11), publishes no armv7 container image, and needs more RAM than a Pi 2B has.
+The Pi is a data sink only.
+
+---
+
+## Hardware
+
+| Part | Adafruit PID | Interface |
+| --- | --- | --- |
+| ESP32 Feather V2, pre-soldered headers, 8 MB flash + 2 MB PSRAM | 5900 | — |
+| BME280 temperature / humidity / pressure | 2652 | I²C @ 0x77 |
+| SCD-41 true NDIR CO₂ (+ temp/RH) | 5190 | I²C @ 0x62 |
+| PMS5003 particulate sensor + breadboard adapter | 3686 | UART, 9600 baud |
+| STEMMA QT cable, 100 mm (×2) | 4210 | — |
+| Female/female jumper wires | 1950 | — |
+
+No soldering required. Full wiring, pinouts and per-sensor gotchas: [docs/hardware.md](docs/hardware.md).
+
+Two things that are easy to get wrong and expensive to debug — both covered in detail in the
+hardware doc:
+
+- **The PMS5003 needs 5 V on VCC**, from the Feather's `USB` pin, not the `3V` pin. Its logic is
+  3.3 V, so no level shifter is needed.
+- **GPIO2 must be driven HIGH** or no I²C sensor will be detected. The STEMMA QT port runs off
+  its own regulator gated by that pin.
+
+---
+
+## Repo layout
+
+| Path | Contents |
+| --- | --- |
+| `docs/hardware.md` | Bill of materials, pinouts, wiring, sensor gotchas |
+| `docs/design.md` | Schema, storage decisions, API contract, and why |
+| `docs/bring-up.md` | Ordered checklist for the day the parts arrive |
+| `esphome/` | Node firmware config (not yet written) |
+| `pi/` | Ingest service, schema, systemd units (not yet written) |
+
+---
+
+## What it records
+
+Temperature, relative humidity, and barometric pressure (BME280); CO₂, plus a second
+independent temperature and humidity (SCD-41); PM1.0, PM2.5 and PM10 (PMS5003).
+
+Because the node is portable, **location is tracked as a time interval, not as a property of the
+node**. The node identifies the device (`feather-01`); a `placements` table records which room
+it was in and when. Moving it is two writes and no firmware change, and mislabelled history is
+corrected by editing one row rather than rewriting thousands. See
+[docs/design.md](docs/design.md#location-tracking).
+
+---
+
+## Roadmap
+
+Ordered by risk, not by ease.
+
+1. ~~Confirm ESPHome compiles for this board on a laptop~~ — no hardware needed, do first
+2. **Docs and skeleton** ← you are here
+3. Pi ingest service — schema, placements endpoints, backup job, systemd units, fake-node simulator
+4. ESPHome node config — flashed and verified sensor-by-sensor on arrival
+5. Dashboard — move control, liveness indicator, per-placement series segmentation
+6. Tailscale — independent of everything above
+
+---
+
+## Limitations
+
+Stated up front, because most of these are deliberate.
+
+- **Gaps in the record are accepted.** Timestamps are assigned by the server on arrival, and
+  there is no batch endpoint, so a WiFi or Pi-hole outage loses those readings rather than
+  buffering them. This was chosen for simplicity.
+- **Power-loss window.** Readings are buffered in memory for up to a minute, and SQLite runs
+  `synchronous=NORMAL`, which under WAL can lose every transaction since the last checkpoint.
+  Corruption-safe, but the exposure on an abrupt power cut is realistically hours, not seconds.
+- **The PM sensor can't run on battery.** It needs 5 V from the USB pin. A LiPo would give you a
+  temperature/humidity/pressure/CO₂ node only, unless you add a boost converter.
+- **PM data is sparser than everything else.** The laser and fan are rated for roughly
+  6000–8000 hours, so the sensor is duty-cycled to about 10%. PM arrives every ~5 minutes
+  against ~45 seconds for the other metrics.
+- **Absolute CO₂ may not be trustworthy on a portable node.** The SCD-41's automatic
+  self-calibration needs days of continuous running, and every room move power-cycles it. See
+  the hardware doc; relative trends are fine regardless.
+- **Pi-hole is a dependency for ingest.** The node resolves `envlog.home` through it, so a
+  Pi-hole outage stops data collection. A static-IP fallback in the node config mitigates this.
+- **Single node.** The schema supports several, but nothing has been tested with more than one.

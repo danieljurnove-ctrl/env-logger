@@ -1,0 +1,24 @@
+# Secrets — never commit
+secrets.yaml
+.env
+*.token
+
+# Databases and their WAL sidecars
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# ESPHome build artifacts
+.esphome/
+esphome/build/
+
+# OS noise
+.DS_Store
