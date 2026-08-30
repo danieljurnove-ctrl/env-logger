@@ -1,0 +1,5 @@
+# Pinned for a service meant to run for years on ARMv7. Bookworm marks its system
+# Python externally managed (PEP 668), so this installs into a venv --
+# never --break-system-packages.
+flask==3.1.0
+waitress==3.0.2

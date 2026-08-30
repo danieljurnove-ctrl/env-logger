@@ -75,7 +75,7 @@ hardware doc:
 | `docs/design.md` | Schema, storage decisions, API contract, and why |
 | `docs/bring-up.md` | Ordered checklist for the day the parts arrive |
 | `esphome/` | Node firmware config (not yet written) |
-| `pi/` | Ingest service, schema, systemd units (not yet written) |
+| `pi/` | Ingest service, schema, dashboard, systemd units |
 
 ---
 
@@ -99,10 +99,12 @@ Ordered by risk, not by ease.
 1. ~~Confirm ESPHome compiles for this board on a laptop~~ — **done 2026-08-30**: Windows 11,
    Python 3.13, ESPHome 2026.8.1, ESP-IDF 5.5.5. See
    [bring-up step 0](docs/bring-up.md#step-0--confirm-esphome-builds-for-this-board).
-2. **Docs and skeleton** ← you are here
-3. Pi ingest service — schema, placements endpoints, backup job, systemd units, fake-node simulator
-4. ESPHome node config — flashed and verified sensor-by-sensor on arrival
-5. Dashboard — move control, liveness indicator, per-placement series segmentation
+2. ~~Docs and skeleton~~
+3. ~~Pi ingest service~~ — schema, placements endpoints, backup job, systemd units,
+   fake-node simulator. See [pi/README.md](pi/README.md).
+4. ~~Dashboard~~ — move control, liveness indicator, per-placement series segmentation
+   *(built out of order: it needed no hardware either, and the simulator gave it real data)*
+5. **ESPHome node config** ← you are here — flashed and verified sensor-by-sensor on arrival
 6. Tailscale — independent of everything above
 
 ---

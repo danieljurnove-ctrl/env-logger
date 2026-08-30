@@ -1,0 +1,37 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # 3.11 is what Raspberry Pi OS Bookworm ships, and the Pi is where this
+          # actually runs. Testing on something newer would let a 3.12-only
+          # construct through.
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r pi/requirements.txt pytest
+
+      - name: Run tests
+        working-directory: pi
+        run: python -m pytest test_app.py -q
+
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check shell scripts
+        run: |
+          bash -n pi/backup.sh
+          bash -n pi/install.sh
+          shellcheck pi/backup.sh pi/install.sh

@@ -106,13 +106,19 @@ better to find out now than with a box of sensors on the desk.
 
 ## Step 1 — Pi: ingest service
 
+Install per [pi/README.md](../pi/README.md) — the short version:
+
 ```sh
-sudo mkdir -p /var/lib/envlog
+sudo mkdir -p /opt/envlog /var/lib/envlog /etc/envlog
+sudo cp pi/app.py pi/schema.sql pi/backup.sh pi/requirements.txt /opt/envlog/
 python3 -m venv /opt/envlog/.venv
-/opt/envlog/.venv/bin/pip install flask waitress
+/opt/envlog/.venv/bin/pip install -r /opt/envlog/requirements.txt
+printf 'ENVLOG_TOKEN=%s\n' "$(openssl rand -hex 32)" | sudo tee /etc/envlog/envlog.env
+sudo chmod 600 /etc/envlog/envlog.env
 ```
 
-Initialise the database from `schema.sql`, then run the service and post a fake reading:
+The schema is applied on first start, so there is no separate init step. Start the service, then
+post a fake reading:
 
 ```sh
 curl -X POST http://localhost:8000/ingest \
@@ -125,7 +131,12 @@ curl -X POST http://localhost:8000/ingest \
 sensible `ts` and NULLs in the columns you didn't send.
 
 Also confirm the token is actually enforced — the same request without the header should be
-rejected.
+rejected, and so should `GET /` and `GET /api/series`. Auth covers every endpoint, not just
+`/ingest`.
+
+With that working, `pi/simulate_node.py` can drive the rest of the Pi-side bring-up without any
+hardware: `--backfill-hours 48` writes two days of history for the dashboard to draw, and
+`--fast` posts over HTTP exactly as the node will.
 
 ---
 
@@ -134,9 +145,11 @@ rejected.
 Install the nightly `VACUUM INTO` + rsync job (see [design.md](design.md#backups)) and run it once
 by hand.
 
-Note that the snapshot has to land somewhere that speaks rsync. The Windows dev laptop does not
-without extra tooling, so the off-box target needs deciding — another Linux host, a NAS, or
-switching this job to `scp`/`sftp`, which Windows does support.
+Set `ENVLOG_BACKUP_DEST` in `/etc/envlog/backup.conf` first. **It is unset by default, and
+`backup.sh` warns and exits 0 in that state** — a snapshot that never leaves the SD card is not a
+backup, and the SD card is the component most likely to fail. The script uses `rsync` when it is
+present and falls back to `scp`, so a Windows target works: Windows' built-in OpenSSH has `scp`
+but not `rsync`.
 
 **Verify:** a snapshot file exists on the *other* machine, and
 `sqlite3 <snapshot> "SELECT count(*) FROM readings;"` opens it cleanly.
