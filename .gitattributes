@@ -1,0 +1,5 @@
+# Development happens on Windows; the Pi runs shell scripts, systemd units and SQL
+# checked straight out of this repo. A CRLF shebang fails with
+# "bad interpreter: /bin/bash^M" and a CRLF unit file fails to parse, both with
+# errors that point nowhere near the real cause. Normalise everything to LF.
+* text=auto eol=lf
