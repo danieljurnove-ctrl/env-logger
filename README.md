@@ -99,8 +99,9 @@ Ordered by risk, not by ease.
 1. ~~Confirm ESPHome compiles for this board on a laptop~~ — **done 2026-08-30**: Windows 11,
    Python 3.13, ESPHome 2026.8.1, ESP-IDF 5.5.5. See
    [bring-up step 0](docs/bring-up.md#step-0--confirm-esphome-builds-for-this-board).
-2. **Docs and skeleton** ← you are here
-3. Pi ingest service — schema, placements endpoints, backup job, systemd units, fake-node simulator
+2. ~~Docs and skeleton~~
+3. **Pi ingest service** ← you are here — schema, placements endpoints, backup job, systemd
+   units, fake-node simulator. See [pi/README.md](pi/README.md).
 4. ESPHome node config — flashed and verified sensor-by-sensor on arrival
 5. Dashboard — move control, liveness indicator, per-placement series segmentation
 6. Tailscale — independent of everything above

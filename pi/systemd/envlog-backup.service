@@ -1,0 +1,16 @@
+[Unit]
+Description=envlog nightly database snapshot
+Documentation=https://github.com/danieljurnove-ctrl/env-logger
+
+[Service]
+Type=oneshot
+User=envlog
+Group=envlog
+EnvironmentFile=-/etc/envlog/envlog.env
+ExecStart=/opt/envlog/backup.sh
+# The snapshot directory and the database are the only writable paths.
+ReadWritePaths=/var/lib/envlog /var/backups/envlog
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes

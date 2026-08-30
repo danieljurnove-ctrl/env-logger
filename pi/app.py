@@ -1,0 +1,705 @@
+"""envlog ingest service.
+
+Flask behind waitress: a synchronous, single-writer service handling single-digit
+requests per minute. Reasoning for every decision here is in docs/design.md; the
+comments below note only what is easy to get wrong.
+
+Run with::
+
+    ENVLOG_TOKEN=... /opt/envlog/.venv/bin/python -m pi.app
+
+or, in production, via the waitress entry point in systemd/envlog.service.
+"""
+
+from __future__ import annotations
+
+import atexit
+import hmac
+import os
+import sqlite3
+import threading
+import time
+from datetime import datetime
+from functools import wraps
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from flask import Flask, current_app, g, jsonify, request
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SCHEMA_PATH = os.path.join(HERE, "schema.sql")
+
+# Column -> plausible range. Anything outside is a sensor fault or a wiring
+# mistake, not a reading; see _validate for why it NULLs the column rather than
+# rejecting the whole row.
+SENSOR_RANGES = {
+    "bme_temp_c": (-50.0, 100.0),
+    "bme_rh_pct": (0.0, 100.0),
+    "pressure_hpa": (300.0, 1100.0),
+    "scd_temp_c": (-50.0, 100.0),
+    "scd_rh_pct": (0.0, 100.0),
+    "co2_ppm": (0.0, 40000.0),
+    "pm1_0_atm": (0.0, 1000.0),
+    "pm2_5_atm": (0.0, 1000.0),
+    "pm10_atm": (0.0, 1000.0),
+}
+SENSOR_COLUMNS = tuple(SENSOR_RANGES)
+READING_COLUMNS = ("node_id", "ts") + SENSOR_COLUMNS + ("boot_count",)
+
+
+class ValidationError(ValueError):
+    """A request body the node should not have sent."""
+
+
+# --------------------------------------------------------------------------- db
+
+
+def connect(db_path: str) -> sqlite3.Connection:
+    """Open a connection with the pragmas that do NOT persist in the file.
+
+    journal_mode lives in schema.sql because it is a property of the database.
+    These three reset every time, and foreign_keys defaults to OFF, so a
+    connection opened without them silently runs with none of the intended
+    settings.
+    """
+    conn = sqlite3.connect(db_path, timeout=5.0)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+def init_db(db_path: str) -> None:
+    parent = os.path.dirname(os.path.abspath(db_path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(SCHEMA_PATH, encoding="utf-8") as fh:
+        schema = fh.read()
+    conn = connect(db_path)
+    try:
+        conn.executescript(schema)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _get_db() -> sqlite3.Connection:
+    if "db" not in g:
+        g.db = connect(current_app.config["ENVLOG_DB"])
+    return g.db
+
+
+def _get_or_create(conn: sqlite3.Connection, table: str, name: str) -> int:
+    """Resolve a nodes/rooms name to an id, inserting it if new.
+
+    table is never user-supplied -- it is a literal at both call sites.
+    """
+    row = conn.execute(f"SELECT id FROM {table} WHERE name = ?", (name,)).fetchone()
+    if row is not None:
+        return int(row["id"])
+    cur = conn.execute(f"INSERT INTO {table} (name) VALUES (?)", (name,))
+    return int(cur.lastrowid)
+
+
+# ------------------------------------------------------------------------ auth
+
+
+def _require_token(view):
+    """Auth on every endpoint, not just /ingest.
+
+    A tailnet is a flat network: every device and user on it can otherwise read
+    the dashboard. compare_digest rather than == so the comparison is not
+    timing-variable.
+    """
+
+    @wraps(view)
+    def wrapper(*args, **kwargs):
+        expected = current_app.config["ENVLOG_TOKEN"]
+        presented = request.headers.get("X-Auth-Token", "")
+        if not hmac.compare_digest(presented, expected):
+            return jsonify(error="unauthorized"), 401
+        return view(*args, **kwargs)
+
+    return wrapper
+
+
+# ------------------------------------------------------------------ validation
+
+
+def _validate(payload: object) -> tuple[str, dict]:
+    """Turn a POST body into (node_name, column values).
+
+    A failed sensor NULLs its own columns and never drops the whole row: if the
+    SCD-41 times out on I2C while the BME280 responds, that reading is still
+    worth keeping. So an out-of-range value discards that column only.
+
+    Structural problems -- not an object, missing node, unknown key, wrong type --
+    are the node's bug and raise, because silently accepting them would hide a
+    firmware typo behind a column of NULLs.
+    """
+    if not isinstance(payload, dict):
+        raise ValidationError("body must be a JSON object")
+
+    node = payload.get("node")
+    if not isinstance(node, str) or not node.strip():
+        raise ValidationError("'node' must be a non-empty string")
+
+    known = set(SENSOR_COLUMNS) | {"node", "boot_count"}
+    unknown = sorted(set(payload) - known)
+    if unknown:
+        raise ValidationError(f"unknown field(s): {', '.join(unknown)}")
+
+    values: dict[str, float | int | None] = {c: None for c in SENSOR_COLUMNS}
+    values["boot_count"] = None
+
+    for column in SENSOR_COLUMNS:
+        if column not in payload:
+            continue  # omitted -> NULL -> a gap, which is the contract
+        raw = payload[column]
+        if raw is None:
+            continue
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            raise ValidationError(f"'{column}' must be a number or null")
+        low, high = SENSOR_RANGES[column]
+        if not (low <= float(raw) <= high):
+            continue  # implausible: NULL this column, keep the rest of the row
+        values[column] = float(raw)
+
+    boot = payload.get("boot_count")
+    if boot is not None:
+        if isinstance(boot, bool) or not isinstance(boot, int) or boot < 0:
+            raise ValidationError("'boot_count' must be a non-negative integer")
+        values["boot_count"] = boot
+
+    # pm1_0 <= pm2_5 <= pm10 is physical: each size band includes the smaller
+    # ones. A violation means the sensor is confused, so drop all three rather
+    # than record an ordering that cannot happen.
+    pm = [values["pm1_0_atm"], values["pm2_5_atm"], values["pm10_atm"]]
+    if all(v is not None for v in pm) and not (pm[0] <= pm[1] <= pm[2]):
+        values["pm1_0_atm"] = values["pm2_5_atm"] = values["pm10_atm"] = None
+
+    return node.strip(), values
+
+
+# ----------------------------------------------------------------- write buffer
+
+
+class ReadingBuffer:
+    """Holds readings in memory and flushes them in one transaction per minute.
+
+    One fsync a minute rather than one per reading is the largest single lever on
+    SD-card wear. The cost is up to a minute of readings lost on an unclean
+    shutdown, which docs/design.md accepts explicitly.
+    """
+
+    def __init__(self, db_path: str, interval: float) -> None:
+        self._db_path = db_path
+        self._interval = interval
+        self._lock = threading.Lock()
+        self._pending: list[tuple[str, int, dict]] = []
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def add(self, node: str, ts: int, values: dict) -> None:
+        with self._lock:
+            self._pending.append((node, ts, values))
+
+    def pending_count(self) -> int:
+        with self._lock:
+            return len(self._pending)
+
+    def flush(self) -> int:
+        """Write everything buffered. Returns the number of rows accepted."""
+        with self._lock:
+            batch, self._pending = self._pending, []
+        if not batch:
+            return 0
+
+        conn = None
+        try:
+            # connect() inside the try: if opening the database fails (locked,
+            # disk full), the batch must go back on the queue, not vanish.
+            conn = connect(self._db_path)
+            with conn:  # one transaction, one fsync
+                node_ids: dict[str, int] = {}
+                rows = []
+                for node, ts, values in batch:
+                    if node not in node_ids:
+                        node_ids[node] = _get_or_create(conn, "nodes", node)
+                    rows.append(
+                        (node_ids[node], ts) + tuple(values[c] for c in SENSOR_COLUMNS)
+                        + (values["boot_count"],)
+                    )
+                placeholders = ", ".join("?" * len(READING_COLUMNS))
+                # A client retry, or the Pi's clock stepping backwards after an
+                # NTP sync, would otherwise collide on PRIMARY KEY (node_id, ts).
+                conn.executemany(
+                    f"INSERT INTO readings ({', '.join(READING_COLUMNS)}) "
+                    f"VALUES ({placeholders}) ON CONFLICT DO NOTHING",
+                    rows,
+                )
+        except sqlite3.Error:
+            # Put them back rather than lose them; the next tick tries again.
+            with self._lock:
+                self._pending = batch + self._pending
+            raise
+        finally:
+            if conn is not None:
+                conn.close()
+        return len(batch)
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(
+            target=self._run, name="envlog-flush", daemon=True
+        )
+        self._thread.start()
+        atexit.register(self.stop)
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval):
+            try:
+                self.flush()
+            except sqlite3.Error:  # pragma: no cover - transient lock contention
+                pass
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5.0)
+            self._thread = None
+        try:
+            self.flush()  # last write on the way down
+        except sqlite3.Error:  # pragma: no cover
+            pass
+
+
+# ---------------------------------------------------------------- series query
+
+# All real-world IANA UTC offsets are whole multiples of 15 minutes, so folding
+# 900-second buckets into local calendar days is exact -- and it lets a year-long
+# day view aggregate ~35k buckets instead of ~700k raw rows on a Pi 2B.
+DAY_SUBBUCKET = 900
+
+
+def _resolve_node(conn: sqlite3.Connection, name: str | None) -> tuple[int, str]:
+    if name:
+        row = conn.execute("SELECT id, name FROM nodes WHERE name = ?", (name,)).fetchone()
+    else:
+        # Single-node is the normal case; only guess when it is unambiguous.
+        rows = conn.execute("SELECT id, name FROM nodes ORDER BY id LIMIT 2").fetchall()
+        if len(rows) != 1:
+            raise ValidationError("'node' is required when several nodes exist")
+        row = rows[0]
+    if row is None:
+        raise ValidationError(f"unknown node: {name}")
+    return int(row["id"]), str(row["name"])
+
+
+def _query_buckets(conn, node_id, metrics, t_from, t_to, bucket):
+    """Aggregate readings into buckets, carrying the placement each falls in.
+
+    The LEFT JOINs are the ones from docs/design.md#location-tracking: location
+    resolves at query time, and unlabelled periods survive as 'Unknown' rather
+    than silently vanishing.
+
+    Column names are interpolated, so metrics MUST already be whitelisted.
+    """
+    selects = ["(r.ts / ?) * ? AS bucket_ts"]
+    params: list[object] = [bucket, bucket]
+    for m in metrics:
+        selects.append(f"AVG(r.{m}) AS {m}")
+        selects.append(f"COUNT(r.{m}) AS n_{m}")
+    sql = f"""
+        SELECT p.id AS placement_id,
+               COALESCE(m.name, 'Unknown') AS location,
+               p.note AS note,
+               {', '.join(selects)}
+        FROM readings r
+        LEFT JOIN placements p
+          ON  p.node_id = r.node_id
+          AND r.ts >= p.start_ts
+          AND (p.end_ts IS NULL OR r.ts < p.end_ts)
+        LEFT JOIN rooms m ON m.id = p.room_id
+        WHERE r.node_id = ? AND r.ts >= ? AND r.ts < ?
+        GROUP BY placement_id, location, note, bucket_ts
+        ORDER BY bucket_ts
+    """
+    params += [node_id, t_from, t_to]
+    return conn.execute(sql, params).fetchall()
+
+
+def _fold_into_local_days(rows, metrics, tz):
+    """Combine 900s buckets into local calendar days.
+
+    Weighted by each bucket's sample count -- averaging pre-averaged buckets
+    unweighted would over-weight a bucket that happened to hold one reading.
+    """
+    out: dict[tuple, dict] = {}
+    order: list[tuple] = []
+    for row in rows:
+        local = datetime.fromtimestamp(row["bucket_ts"], tz)
+        day_start = int(
+            local.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        )
+        key = (row["placement_id"], row["location"], row["note"], day_start)
+        if key not in out:
+            out[key] = {m: [0.0, 0] for m in metrics}
+            order.append(key)
+        for m in metrics:
+            n = row[f"n_{m}"] or 0
+            if n:
+                out[key][m][0] += float(row[m]) * n
+                out[key][m][1] += n
+    folded = []
+    for key in order:
+        placement_id, location, note, day_start = key
+        values = {}
+        for m in metrics:
+            total, n = out[key][m]
+            values[m] = (total / n) if n else None
+        folded.append((placement_id, location, note, day_start, values))
+    folded.sort(key=lambda item: item[3])
+    return folded
+
+
+def _segment(entries, metrics):
+    """Split a flat, time-ordered list into one segment per placement.
+
+    A move breaks the line: drawing a trend across a move from the bedroom to the
+    kitchen renders a slope that never happened.
+    """
+    segments = []
+    for placement_id, location, note, ts, values in entries:
+        if not segments or segments[-1]["placement_id"] != placement_id:
+            segments.append(
+                {
+                    "placement_id": placement_id,
+                    "location": location,
+                    "note": note,
+                    "rows": [],
+                }
+            )
+        segments[-1]["rows"].append([ts] + [values[m] for m in metrics])
+    return segments
+
+
+# --------------------------------------------------------------------- the app
+
+
+def create_app(db_path=None, token=None, flush_interval=None, start_flusher=True):
+    app = Flask(__name__)
+    app.config["ENVLOG_DB"] = db_path or os.environ.get(
+        "ENVLOG_DB", "/var/lib/envlog/envlog.db"
+    )
+    app.config["ENVLOG_TOKEN"] = token or os.environ.get("ENVLOG_TOKEN", "")
+    # A body cap costs nothing and is the one real protection here; docs/design.md
+    # explains why TLS on the LAN would be theatre and this is not.
+    app.config["MAX_CONTENT_LENGTH"] = 16 * 1024
+
+    if not app.config["ENVLOG_TOKEN"]:
+        raise RuntimeError(
+            "ENVLOG_TOKEN is not set. Refusing to start: auth covers every "
+            "endpoint, so an empty token would expose all of them."
+        )
+
+    init_db(app.config["ENVLOG_DB"])
+
+    interval = (
+        flush_interval
+        if flush_interval is not None
+        else float(os.environ.get("ENVLOG_FLUSH_INTERVAL", "60"))
+    )
+    app.buffer = ReadingBuffer(app.config["ENVLOG_DB"], interval)
+    if start_flusher:
+        app.buffer.start()
+
+    @app.teardown_appcontext
+    def _close_db(_exc):
+        db = g.pop("db", None)
+        if db is not None:
+            db.close()
+
+    @app.errorhandler(ValidationError)
+    def _bad_request(exc):
+        return jsonify(error=str(exc)), 400
+
+    @app.errorhandler(413)
+    def _too_large(_exc):
+        return jsonify(error="request body too large"), 413
+
+    # ---------------------------------------------------------------- ingest
+
+    @app.post("/ingest")
+    @_require_token
+    def ingest():
+        node, values = _validate(request.get_json(silent=True))
+        # The server assigns ts on arrival. The ESP32 has no RTC, and LAN latency
+        # is milliseconds against a 45-second sample interval. This is also why
+        # there is no batch endpoint: a replayed backlog would arrive with one
+        # timestamp and collide with itself.
+        ts = int(time.time())
+        app.buffer.add(node, ts, values)
+        return jsonify(status="buffered", ts=ts), 202
+
+    # ------------------------------------------------------------ placements
+
+    @app.get("/placements")
+    @_require_token
+    def list_placements():
+        conn = _get_db()
+        rows = conn.execute(
+            """SELECT p.id, n.name AS node, m.name AS room,
+                      p.start_ts, p.end_ts, p.note
+               FROM placements p
+               JOIN nodes n ON n.id = p.node_id
+               JOIN rooms m ON m.id = p.room_id
+               ORDER BY p.start_ts DESC"""
+        ).fetchall()
+        return jsonify(placements=[dict(r) for r in rows])
+
+    @app.post("/placements")
+    @_require_token
+    def create_placement():
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            raise ValidationError("body must be a JSON object")
+        node = payload.get("node")
+        room = payload.get("room")
+        if not isinstance(node, str) or not node.strip():
+            raise ValidationError("'node' must be a non-empty string")
+        if not isinstance(room, str) or not room.strip():
+            raise ValidationError("'room' must be a non-empty string")
+        note = payload.get("note")
+        if note is not None and not isinstance(note, str):
+            raise ValidationError("'note' must be a string or null")
+        start_ts = payload.get("start_ts", int(time.time()))
+        if isinstance(start_ts, bool) or not isinstance(start_ts, int):
+            raise ValidationError("'start_ts' must be an integer unix timestamp")
+
+        conn = _get_db()
+        with conn:
+            node_id = _get_or_create(conn, "nodes", node.strip())
+            room_id = _get_or_create(conn, "rooms", room.strip())
+            # Close the open placement before opening the next. SQLite cannot
+            # enforce non-overlap declaratively, so this is the invariant's only
+            # guard -- test_app.py checks it holds.
+            conn.execute(
+                "UPDATE placements SET end_ts = ? "
+                "WHERE node_id = ? AND end_ts IS NULL AND start_ts <= ?",
+                (start_ts, node_id, start_ts),
+            )
+            cur = conn.execute(
+                "INSERT INTO placements (node_id, room_id, start_ts, end_ts, note) "
+                "VALUES (?, ?, ?, NULL, ?)",
+                (node_id, room_id, start_ts, note),
+            )
+            placement_id = int(cur.lastrowid)
+        return jsonify(id=placement_id, node=node.strip(), room=room.strip(),
+                       start_ts=start_ts, note=note), 201
+
+    @app.patch("/placements/<int:placement_id>")
+    @_require_token
+    def update_placement(placement_id: int):
+        """Retroactive correction: mislabelled history is one row, not thousands."""
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            raise ValidationError("body must be a JSON object")
+        allowed = {"room", "start_ts", "end_ts", "note"}
+        unknown = sorted(set(payload) - allowed)
+        if unknown:
+            raise ValidationError(f"unknown field(s): {', '.join(unknown)}")
+        if not payload:
+            raise ValidationError("nothing to update")
+
+        conn = _get_db()
+        row = conn.execute(
+            "SELECT * FROM placements WHERE id = ?", (placement_id,)
+        ).fetchone()
+        if row is None:
+            return jsonify(error="no such placement"), 404
+
+        sets, params = [], []
+        with conn:
+            if "room" in payload:
+                room = payload["room"]
+                if not isinstance(room, str) or not room.strip():
+                    raise ValidationError("'room' must be a non-empty string")
+                sets.append("room_id = ?")
+                params.append(_get_or_create(conn, "rooms", room.strip()))
+            for field in ("start_ts", "end_ts"):
+                if field in payload:
+                    value = payload[field]
+                    if value is not None and (
+                        isinstance(value, bool) or not isinstance(value, int)
+                    ):
+                        raise ValidationError(f"'{field}' must be an integer or null")
+                    sets.append(f"{field} = ?")
+                    params.append(value)
+            if "note" in payload:
+                note = payload["note"]
+                if note is not None and not isinstance(note, str):
+                    raise ValidationError("'note' must be a string or null")
+                sets.append("note = ?")
+                params.append(note)
+
+            start_ts = payload.get("start_ts", row["start_ts"])
+            end_ts = payload.get("end_ts", row["end_ts"])
+            if start_ts is None:
+                raise ValidationError("'start_ts' may not be null")
+            if end_ts is not None and end_ts <= start_ts:
+                raise ValidationError("'end_ts' must be after 'start_ts'")
+
+            params.append(placement_id)
+            conn.execute(
+                f"UPDATE placements SET {', '.join(sets)} WHERE id = ?", params
+            )
+            updated = conn.execute(
+                """SELECT p.id, n.name AS node, m.name AS room,
+                          p.start_ts, p.end_ts, p.note
+                   FROM placements p
+                   JOIN nodes n ON n.id = p.node_id
+                   JOIN rooms m ON m.id = p.room_id
+                   WHERE p.id = ?""",
+                (placement_id,),
+            ).fetchone()
+        return jsonify(dict(updated))
+
+    # -------------------------------------------------------------- read API
+
+    @app.get("/api/status")
+    @_require_token
+    def status():
+        """Liveness. Without it a dead node is discovered whenever you next
+        happen to open the page -- a real risk for a node that is often
+        unplugged."""
+        conn = _get_db()
+        requested = request.args.get("node")
+        if requested is None and not conn.execute(
+            "SELECT 1 FROM nodes LIMIT 1"
+        ).fetchone():
+            # A freshly installed Pi has no nodes yet. That is a legitimate
+            # state to report, not a client error -- this endpoint is exactly
+            # what you curl to find out whether anything has arrived.
+            return jsonify(
+                node=None, now=int(time.time()), last_ts=None,
+                seconds_since_last=None, buffered=app.buffer.pending_count(),
+                placement=None,
+            )
+        node_id, node_name = _resolve_node(conn, requested)
+        row = conn.execute(
+            "SELECT MAX(ts) AS last_ts FROM readings WHERE node_id = ?", (node_id,)
+        ).fetchone()
+        last_ts = row["last_ts"] if row else None
+        where = conn.execute(
+            """SELECT m.name AS room, p.note, p.start_ts
+               FROM placements p JOIN rooms m ON m.id = p.room_id
+               WHERE p.node_id = ? AND p.end_ts IS NULL
+               ORDER BY p.start_ts DESC LIMIT 1""",
+            (node_id,),
+        ).fetchone()
+        now = int(time.time())
+        return jsonify(
+            node=node_name,
+            now=now,
+            last_ts=last_ts,
+            seconds_since_last=(None if last_ts is None else now - int(last_ts)),
+            buffered=app.buffer.pending_count(),
+            placement=(dict(where) if where else None),
+        )
+
+    @app.get("/api/series")
+    @_require_token
+    def series():
+        conn = _get_db()
+        args = request.args
+
+        node_id, node_name = _resolve_node(conn, args.get("node"))
+
+        requested = args.get("metrics", "co2_ppm")
+        metrics = [m.strip() for m in requested.split(",") if m.strip()]
+        # Whitelist: these names go straight into the SELECT list.
+        bad = [m for m in metrics if m not in SENSOR_RANGES]
+        if bad:
+            raise ValidationError(f"unknown metric(s): {', '.join(bad)}")
+        if not metrics:
+            raise ValidationError("'metrics' must name at least one column")
+
+        tz_name = args.get("tz", "UTC")
+        try:
+            tz = ZoneInfo(tz_name)
+        except (ZoneInfoNotFoundError, ValueError):
+            raise ValidationError(f"unknown timezone: {tz_name}")
+
+        now = int(time.time())
+        try:
+            t_to = int(args.get("to", now))
+            t_from = int(args.get("from", t_to - 24 * 3600))
+        except ValueError:
+            raise ValidationError("'from' and 'to' must be integer unix timestamps")
+        if t_from >= t_to:
+            raise ValidationError("'from' must be before 'to'")
+
+        bucket_arg = args.get("bucket", "1")
+        if bucket_arg == "day":
+            rows = _query_buckets(
+                conn, node_id, metrics, t_from, t_to, DAY_SUBBUCKET
+            )
+            entries = _fold_into_local_days(rows, metrics, tz)
+        else:
+            try:
+                bucket = int(bucket_arg)
+            except ValueError:
+                raise ValidationError("'bucket' must be an integer or 'day'")
+            if bucket < 1:
+                raise ValidationError("'bucket' must be at least 1 second")
+            rows = _query_buckets(conn, node_id, metrics, t_from, t_to, bucket)
+            entries = [
+                (
+                    r["placement_id"],
+                    r["location"],
+                    r["note"],
+                    r["bucket_ts"],
+                    {m: r[m] for m in metrics},
+                )
+                for r in rows
+            ]
+
+        return jsonify(
+            node=node_name,
+            tz=tz_name,
+            bucket=bucket_arg,
+            **{"from": t_from},
+            to=t_to,
+            columns=["ts"] + metrics,
+            segments=_segment(entries, metrics),
+        )
+
+    @app.get("/")
+    @_require_token
+    def dashboard():
+        # Roadmap item 5. Kept behind the same auth as everything else so it does
+        # not become the one unauthenticated endpoint when it lands.
+        return (
+            "<!doctype html><meta charset=utf-8><title>envlog</title>"
+            "<p>envlog ingest is running. The dashboard is roadmap item 5; "
+            "until then see <code>/api/series</code> and <code>/api/status</code>.</p>",
+            200,
+            {"Content-Type": "text/html; charset=utf-8"},
+        )
+
+    return app
+
+
+def main() -> None:  # pragma: no cover - process entry point
+    from waitress import serve
+
+    app = create_app()
+    host = os.environ.get("ENVLOG_BIND", "0.0.0.0")
+    port = int(os.environ.get("ENVLOG_PORT", "8000"))
+    serve(app, host=host, port=port, threads=4)
+
+
+if __name__ == "__main__":  # pragma: no cover
+    main()

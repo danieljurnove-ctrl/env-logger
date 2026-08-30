@@ -1,0 +1,13 @@
+[Unit]
+Description=Run the envlog snapshot nightly
+Documentation=https://github.com/danieljurnove-ctrl/env-logger
+
+[Timer]
+OnCalendar=daily
+# The Pi is not always up at 00:00, and every other daily timer on the box fires
+# then too. Persistent catches up a missed run; the delay spreads the load.
+Persistent=true
+RandomizedDelaySec=30m
+
+[Install]
+WantedBy=timers.target
