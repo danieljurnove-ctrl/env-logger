@@ -3,12 +3,21 @@
 # The only question this answers: does ESPHome's toolchain resolve, download and
 # compile a firmware image for adafruit_feather_esp32_v2 on this laptop?
 #
-#   python3.12 -m venv ~/.venvs/esphome
+# Windows (PowerShell) — note `py`, not `python3`, which is a Store alias stub:
+#
+#   py -3.13 -m venv $HOME\.venvs\esphome
+#   & $HOME\.venvs\esphome\Scripts\pip.exe install esphome
+#   & $HOME\.venvs\esphome\Scripts\esphome.exe compile esphome\minimal.yaml
+#
+# macOS / Linux:
+#
+#   python3 -m venv ~/.venvs/esphome
 #   ~/.venvs/esphome/bin/pip install esphome
 #   ~/.venvs/esphome/bin/esphome compile esphome/minimal.yaml
 #
-# Expect ~20 minutes on a cold run (most of it downloading the ESP-IDF toolchain
-# into ~/.platformio) and well under a minute on a warm one.
+# Expect ~20 minutes on a cold run, nearly all of it downloading the ESP-IDF
+# toolchain, and well under a minute on a warm one. See bring-up step 0 for the
+# "Needed a single revision" CMake failure and its cause.
 #
 # The WiFi credentials below are deliberately fake and inline: this config is
 # never flashed, so it must compile without a secrets.yaml present. The real

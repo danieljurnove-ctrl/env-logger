@@ -38,6 +38,10 @@ the ingest service serves its own dashboard page instead.
 Bookworm ships 3.11), publishes no armv7 container image, and needs more RAM than a Pi 2B has.
 The Pi is a data sink only.
 
+Development is on **Windows**, with files reaching the ESP32 over USB and the Pi over SSH. See
+[the development machine notes](docs/bring-up.md#development-machine) for the line-ending and
+USB-driver consequences of that.
+
 ---
 
 ## Hardware
@@ -92,7 +96,9 @@ corrected by editing one row rather than rewriting thousands. See
 
 Ordered by risk, not by ease.
 
-1. ~~Confirm ESPHome compiles for this board on a laptop~~ — no hardware needed, do first
+1. ~~Confirm ESPHome compiles for this board on a laptop~~ — **done 2026-08-30**: Windows 11,
+   Python 3.13, ESPHome 2026.8.1, ESP-IDF 5.5.5. See
+   [bring-up step 0](docs/bring-up.md#step-0--confirm-esphome-builds-for-this-board).
 2. **Docs and skeleton** ← you are here
 3. Pi ingest service — schema, placements endpoints, backup job, systemd units, fake-node simulator
 4. ESPHome node config — flashed and verified sensor-by-sensor on arrival
