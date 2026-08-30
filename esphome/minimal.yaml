@@ -1,0 +1,33 @@
+# Step 0 — board bring-up smoke test. No hardware, no sensors.
+#
+# The only question this answers: does ESPHome's toolchain resolve, download and
+# compile a firmware image for adafruit_feather_esp32_v2 on this laptop?
+#
+#   python3.12 -m venv ~/.venvs/esphome
+#   ~/.venvs/esphome/bin/pip install esphome
+#   ~/.venvs/esphome/bin/esphome compile esphome/minimal.yaml
+#
+# Expect ~20 minutes on a cold run (most of it downloading the ESP-IDF toolchain
+# into ~/.platformio) and well under a minute on a warm one.
+#
+# The WiFi credentials below are deliberately fake and inline: this config is
+# never flashed, so it must compile without a secrets.yaml present. The real
+# node config (env-node.yaml) uses !secret for all of these.
+
+esphome:
+  name: minimal-compile-test
+
+esp32:
+  board: adafruit_feather_esp32_v2
+
+wifi:
+  ssid: "compile-test-only"
+  password: "compile-test-only"
+
+logger:
+
+api:
+
+ota:
+  - platform: esphome
+    password: "compile-test-only"
