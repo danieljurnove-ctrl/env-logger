@@ -172,8 +172,15 @@ address, and `curl http://envlog.home:8000/` responds.
 
 ## Step 4 — Node: I²C only
 
-Flash over USB-C with a **data** cable. Config at this point should contain the GPIO2 power switch
-and the `i2c:` bus with `scan` on — **and no sensor components at all.**
+Copy `esphome/secrets.yaml.example` to `esphome/secrets.yaml` and fill it in first — the ingest
+token is the one the installer printed in step 1.
+
+Flash [`esphome/i2c-scan.yaml`](../esphome/i2c-scan.yaml) over USB-C with a **data** cable. It is
+the GPIO2 power switch and the `i2c:` bus with `scan` on, and **no sensor components at all.**
+
+```powershell
+& $HOME\.venvs\esphome\Scripts\esphome.exe run esphome\i2c-scan.yaml
+```
 
 **Verify:** the boot log lists **both** `0x62` (SCD-41) and `0x77` (BME280).
 
@@ -185,8 +192,10 @@ see [hardware.md](hardware.md#the-i2c-power-trap).
 
 ## Step 5 — Node: sensors one at a time
 
-Add `bme280_i2c`, check the log. Then add `scd4x`, check the log. Wire the SCD-41's pressure
-compensation to the BME280's pressure sensor.
+Switch to [`esphome/env-node.yaml`](../esphome/env-node.yaml), cut at the `--- STEP 6` marker —
+delete from there down. That leaves `bme280_i2c` and `scd4x` and nothing else. Add them one at a
+time if you prefer: BME280 first, check the log, then SCD-41, whose pressure compensation reads
+the BME280 directly and so needs it present.
 
 **Verify:** after each addition, plausible values in the log — not zeros, not NaN, and a
 temperature within a couple of degrees of what the room actually feels like.
@@ -200,8 +209,9 @@ OTA works from here on; no more cable.
 Last, because it needs the four jumpers and because it's the one that can be mis-wired
 destructively. Double-check **VCC goes to `USB`, not `3V`** before powering on.
 
-Set `update_interval: 5min` — strictly greater than 30 s, or the duty cycling silently doesn't
-happen.
+Restore the `uart:` and `pmsx003` blocks — `env-node.yaml` cut at the `--- STEP 7` marker
+instead. `update_interval` is already `5min` there: strictly greater than 30 s, or the duty
+cycling silently doesn't happen.
 
 **Verify:** the fan is audible for about 30 seconds, then stops, then restarts about five minutes
 later. Values appear once per cycle, not continuously.
@@ -210,8 +220,11 @@ later. Values appear once per cycle, not continuously.
 
 ## Step 7 — Node: enable posting
 
-Point `http_request` at `http://envlog.home:8000/ingest` with the auth header, posting only fresh
-sensor values.
+Flash `env-node.yaml` entire. The `interval:` block posts to
+`http://envlog.home:8000/ingest` with the auth header, carrying only the sensor groups that
+produced a reading since the last POST — see
+[esphome/README.md](../esphome/README.md#freshness-and-why-has_state-is-not-enough) for why that
+is tracked with globals rather than `has_state()`.
 
 **Verify:** rows accumulate in the database with the expected cadence — temperature and CO₂ every
 ~45 s, PM roughly every 5 minutes with NULLs in between.
