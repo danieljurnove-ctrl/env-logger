@@ -42,6 +42,22 @@ the older board is the single likeliest way to lose an evening.
 Verified against `espressif/arduino-esp32` → `variants/adafruit_feather_esp32_v2/pins_arduino.h`
 and ESPHome's own `esphome/components/esp32/boards.py`.
 
+**ESPHome refuses GPIO7 and GPIO8 by default**, with *"This pin cannot be used on ESP32s and is
+already used by the flash interface"*. It validates against the generic ESP32, where GPIO6–11 are
+the SPI flash bus. This board is an **ESP32-PICO-MINI-02**, whose flash is inside the module on
+other pins — which is exactly why Adafruit could route RX/TX out to 7 and 8. The error names the
+escape hatch itself, and the config uses it on both UART pins:
+
+```yaml
+rx_pin:
+  number: GPIO7
+  ignore_pin_validation_error: true
+```
+
+It downgrades to a warning on every compile, which is the correct outcome and not something to
+silence. Note that this applies to the *UART* pins only: nothing about GPIO2 or the I²C pins
+needs it.
+
 ---
 
 ## Wiring
@@ -126,8 +142,10 @@ Note that "put it last in the daisy chain" is not a fix — position on an I²C 
 irrelevant, and with two 100 mm cables the BME280 can only get about 200 mm from the board
 anyway. If the offset turns out to be large, a longer cable is the actual remedy.
 
-Both raw and corrected temperature are stored, so the offset can be retuned later and reapplied
-to historical data.
+The node posts this sensor **raw** — no offset filter — because a correction baked into the
+firmware is burnt into the archive permanently. The SCD-41's independent temperature sits in its
+own column right beside it, which is what lets you measure the real offset later and apply it at
+query time, retunable, over history you still have unmodified.
 
 ### SCD-41
 

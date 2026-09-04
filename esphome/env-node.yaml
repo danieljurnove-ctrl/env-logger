@@ -1,0 +1,279 @@
+# The sensor node: BME280 + SCD-41 over I2C, PMS5003 over UART, posting JSON to
+# the Pi's ingest service.
+#
+#   & $HOME\.venvs\esphome\Scripts\esphome.exe run esphome\env-node.yaml
+#
+# Needs esphome/secrets.yaml -- copy secrets.yaml.example. First flash is over
+# USB-C with a DATA cable; everything after that is OTA.
+#
+# Bring it up in stages, not all at once. See esphome/README.md; the short
+# version is that the STEP 5/6/7 blocks below are commented markers you can
+# delete downward from, so that a failure has one new variable in it rather than
+# four. Step 4 (I2C scan, no sensors) is its own file: i2c-scan.yaml.
+
+substitutions:
+  # Device identity, not a room name. Location is tracked server-side as a time
+  # interval -- see docs/design.md#location-tracking.
+  node_name: feather-01
+
+  # Resolved through Pi-hole, which is therefore a dependency for data
+  # collection. If Pi-hole is down or you would rather not depend on it, put the
+  # Pi's LAN IP here instead; nothing else changes.
+  ingest_host: envlog.home
+  ingest_port: "8000"
+
+  # 45s for the two I2C sensors, 5min for PM. The POST interval matches the
+  # faster one; PM simply is not fresh most of the time, and is then omitted.
+  sensor_interval: 45s
+  post_interval: 45s
+  pm_interval: 5min
+
+esphome:
+  name: ${node_name}
+  on_boot:
+    # Not for timing -- the ESP32 has no RTC and the server stamps arrival time.
+    # This drives move detection: every room move unplugs the node, so a reboot
+    # is a candidate move for the dashboard to offer to label.
+    priority: 200
+    then:
+      - lambda: id(boot_count) += 1;
+
+esp32:
+  board: adafruit_feather_esp32_v2
+  framework:
+    # Stated rather than left to default, because it is load-bearing: under
+    # esp-idf nothing drives GPIO2, so the i2c_power switch below is what makes
+    # the STEMMA QT port live. See docs/hardware.md#the-i2c-power-trap.
+    type: esp-idf
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # USB-powered, and the modem sleep that ESP32 does by default adds latency to
+  # every POST for a power saving that is irrelevant on a wall wart.
+  power_save_mode: none
+  # Default is 15min: if WiFi has been unreachable that long, reboot and retry
+  # from scratch. Right for an unattended node -- the readings are lost either
+  # way, and a reboot recovers from more states than waiting does.
+  reboot_timeout: 15min
+
+logger:
+  # The boot log is how every bring-up step below is verified. Over USB at
+  # 115200; over the network once api: is reachable.
+  level: INFO
+
+api:
+  # No Home Assistant here -- this exists so `esphome logs` works over the
+  # network after the cable comes off. reboot_timeout MUST be 0s: it defaults to
+  # 15min and reboots the node when no API client has connected, which without
+  # Home Assistant is always. That is a boot loop with no obvious cause.
+  reboot_timeout: 0s
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+http_request:
+  id: ingest_client
+  useragent: envlog-node/1.0
+  # Longer than the Pi needs (it buffers in memory and returns 202 immediately)
+  # but short enough that a POST cannot overlap the next 45s interval.
+  timeout: 5s
+  verify_ssl: false
+
+globals:
+  # Survives reboots in NVS. One flash write per boot is nothing.
+  - id: boot_count
+    type: int
+    restore_value: true
+    initial_value: "0"
+
+  # "Fresh" flags, one per sensor group. The contract is that a POST carries only
+  # sensors that produced a NEW reading; omitted fields become NULL, which the
+  # schema renders as a gap. has_state() cannot express this -- it stays true
+  # forever once set, so PM (5min) would be repeated across ~6 posts out of 7 and
+  # roughly 85% of the PM series would be fabricated. See
+  # docs/design.md#node--server-contract.
+  - id: fresh_bme
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  - id: fresh_scd
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  - id: fresh_pm
+    type: bool
+    restore_value: false
+    initial_value: "false"
+
+switch:
+  - platform: gpio
+    id: i2c_power
+    # The "GPIO2 is a strapping PIN" warning on every compile is expected and
+    # can be ignored: strapping only matters while the chip latches boot mode at
+    # reset, and nothing external is attached to this pin -- it gates an onboard
+    # regulator.
+    pin: GPIO2
+    restore_mode: ALWAYS_ON
+    # 1200 is POWER in ESPHome's scale, above BUS (1000) where i2c initialises.
+    # Without this every I2C scan comes back empty and the sensors look dead.
+    # Do not instead demote the bus to 600 (DATA) -- that is the same priority
+    # the sensor components use, so it works only by registration-order tie-break.
+    setup_priority: 1200
+    internal: true
+
+i2c:
+  id: bus_a
+  # Not the pins of the original ESP32 Feather. Following a tutorial written for
+  # that board is the likeliest way to lose an evening here.
+  sda: GPIO22
+  scl: GPIO20
+  scan: true
+
+# --- STEP 6: the PM sensor. Delete from here down for steps 4 and 5. ---------
+uart:
+  id: uart_pms
+  # ignore_pin_validation_error is NOT hand-waving here. ESPHome validates pins
+  # against the generic ESP32, where GPIO6-11 are the flash interface, and
+  # refuses these two. This board is an ESP32-PICO-MINI-02: the flash is inside
+  # the module on different pins, which is exactly why Adafruit could route RX
+  # and TX out to 7 and 8 in the first place. Without these two lines the config
+  # does not compile at all -- "already used by the flash interface".
+  rx_pin:
+    number: GPIO7
+    ignore_pin_validation_error: true
+  tx_pin:
+    number: GPIO8
+    ignore_pin_validation_error: true
+  baud_rate: 9600
+
+sensor:
+  # --- STEP 5a ---------------------------------------------------------------
+  - platform: bme280_i2c
+    address: 0x77
+    i2c_id: bus_a
+    update_interval: ${sensor_interval}
+    temperature:
+      id: bme_temp
+      # Raw, deliberately. This sensor self-heats 1-3 C, worse in still air and
+      # worse near the PM fan, but baking a correction in here would burn a
+      # guess into the archive permanently. Keep the node honest, keep the
+      # SCD-41's independent temperature next to it to measure the offset
+      # against, and correct at query time once you know the real number.
+      on_value:
+        then:
+          - lambda: id(fresh_bme) = true;
+    humidity:
+      id: bme_rh
+    pressure:
+      id: bme_pressure
+
+  # --- STEP 5b ---------------------------------------------------------------
+  - platform: scd4x
+    address: 0x62
+    i2c_id: bus_a
+    update_interval: ${sensor_interval}
+    # Halves the self-heating of periodic mode, which matters because this
+    # sensor also reports the temperature you will compare against the BME280.
+    # Requires update_interval >= 30s.
+    measurement_mode: low_power_periodic
+    # Reads the BME280 directly, so CO2 is pressure-compensated with no server
+    # round trip. Do NOT also set altitude_compensation: it is ignored when a
+    # pressure source is configured, and having both invites the belief that the
+    # altitude value is doing something.
+    ambient_pressure_compensation_source: bme_pressure
+    # ESPHome's default. Revisit once you can compare scd_temp_c against
+    # bme_temp_c in the same enclosure -- which is exactly why both are stored.
+    temperature_offset: 4°C
+    # Left on, but treat absolute ppm with suspicion on a portable node: ASC
+    # needs days of continuous running, and GPIO2 gates this sensor's power, so
+    # every room move power-cycles it. Relative trends are fine regardless.
+    # See docs/hardware.md#scd-41 for what to do if it never converges.
+    automatic_self_calibration: true
+    co2:
+      id: co2
+      on_value:
+        then:
+          - lambda: id(fresh_scd) = true;
+    temperature:
+      id: scd_temp
+    humidity:
+      id: scd_rh
+
+  # --- STEP 6 ----------------------------------------------------------------
+  - platform: pmsx003
+    # PMSX003 is the family: PMS5003, 6003, 7003, A003.
+    type: PMSX003
+    uart_id: uart_pms
+    # STRICTLY greater than 30s. The validator accepts >= 30s but the duty-cycle
+    # code tests > 30000ms, so exactly 30s compiles, demands the tx_pin wire, and
+    # then runs the fan continuously anyway with no warning -- about eight months
+    # of laser life instead of two and a half years.
+    update_interval: ${pm_interval}
+    # Atmospheric-environment values, not the CF=1 "standard particle" set
+    # (pm_1_0_std etc). Hence the _atm suffix on the columns.
+    pm_1_0:
+      id: pm1_0
+    pm_2_5:
+      id: pm2_5
+      on_value:
+        then:
+          - lambda: id(fresh_pm) = true;
+    pm_10_0:
+      id: pm10
+
+# --- STEP 7: start posting. Delete from here down for steps 4, 5 and 6. -------
+interval:
+  - interval: ${post_interval}
+    then:
+      - if:
+          condition:
+            and:
+              - wifi.connected:
+              # Nothing fresh means nothing to say. An empty row of NULLs would
+              # occupy a timestamp and draw as a gap anyway.
+              - lambda: return id(fresh_bme) || id(fresh_scd) || id(fresh_pm);
+          then:
+            - http_request.post:
+                url: http://${ingest_host}:${ingest_port}/ingest
+                # NOTE: 'headers' was renamed to 'request_headers'. Older
+                # examples on the web still use the old key; it is now a hard
+                # validation error, not a warning.
+                request_headers:
+                  Content-Type: application/json
+                  X-Auth-Token: !secret ingest_token
+                json: |-
+                  // The server rejects unknown fields outright -- a typo here is
+                  // a 400 for the whole reading, not a silently dropped column.
+                  // Field names must match pi/app.py SENSOR_RANGES exactly.
+                  root["node"] = "${node_name}";
+                  root["boot_count"] = id(boot_count);
+                  if (id(fresh_bme)) {
+                    if (!std::isnan(id(bme_temp).state))     root["bme_temp_c"]   = id(bme_temp).state;
+                    if (!std::isnan(id(bme_rh).state))       root["bme_rh_pct"]   = id(bme_rh).state;
+                    if (!std::isnan(id(bme_pressure).state)) root["pressure_hpa"] = id(bme_pressure).state;
+                  }
+                  if (id(fresh_scd)) {
+                    if (!std::isnan(id(co2).state))      root["co2_ppm"]   = id(co2).state;
+                    if (!std::isnan(id(scd_temp).state)) root["scd_temp_c"] = id(scd_temp).state;
+                    if (!std::isnan(id(scd_rh).state))   root["scd_rh_pct"] = id(scd_rh).state;
+                  }
+                  if (id(fresh_pm)) {
+                    if (!std::isnan(id(pm1_0).state)) root["pm1_0_atm"] = id(pm1_0).state;
+                    if (!std::isnan(id(pm2_5).state)) root["pm2_5_atm"] = id(pm2_5).state;
+                    if (!std::isnan(id(pm10).state))  root["pm10_atm"]  = id(pm10).state;
+                  }
+                on_error:
+                  then:
+                    - logger.log:
+                        level: WARN
+                        format: "ingest POST failed -- reading dropped"
+            # Cleared whether or not the POST succeeded. A reading that failed to
+            # send is stale by the next interval, and there is no batch endpoint
+            # to replay it into: server-assigned timestamps and backlog replay
+            # cannot both exist. Gaps are the accepted trade.
+            - lambda: |-
+                id(fresh_bme) = false;
+                id(fresh_scd) = false;
+                id(fresh_pm) = false;
