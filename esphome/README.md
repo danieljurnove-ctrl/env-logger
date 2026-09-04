@@ -96,10 +96,12 @@ The POST is skipped entirely when nothing is fresh and when WiFi is down.
 every component, pin, key and option in them is schema-valid, and that is how the GPIO7/8
 flash-pin rejection above was found rather than discovered on arrival day.
 
-**Not yet verified:** a full `esphome compile` of `env-node.yaml`, which is what type-checks the
-C++ in the POST lambda. Run it on the laptop before flashing — the toolchain is already warm from
-[step 0](../docs/bring-up.md#step-0--confirm-esphome-builds-for-this-board), so it is a couple of
-minutes, not twenty:
+**A full `esphome compile` of `env-node.yaml` passes** — run on the Windows laptop 2026-09-04.
+That is what type-checks the C++ in the POST lambda, so the freshness globals, the `std::isnan`
+guards and the JSON building are known to compile, not merely known to be schema-valid.
+
+Re-run it after editing the lambda; the toolchain stays warm, so it is a couple of minutes rather
+than twenty:
 
 ```powershell
 & $HOME\.venvs\esphome\Scripts\esphome.exe compile esphome\env-node.yaml
