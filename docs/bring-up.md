@@ -106,7 +106,19 @@ better to find out now than with a box of sensors on the desk.
 
 ## Step 1 — Pi: ingest service
 
-Install per [pi/README.md](../pi/README.md) — the short version:
+Three things to check on the Pi before installing, each of which has already cost an evening once
+(details in [deployment.md](deployment.md)):
+
+- **`python3 --version` must be 3.9 or newer.** `app.py` imports `zoneinfo`, and the pinned Flask
+  and waitress need 3.9+. If it is older, build a newer interpreter with `make altinstall` —
+  never `make install`, which shadows the system `python3` that Pi-hole uses — and install with
+  `sudo ENVLOG_PYTHON=python3.11 bash pi/install.sh`.
+- **`sudo ss -tlnp | grep :8000` must come back empty.** If something already holds the port,
+  `envlog.service` starts and dies with `Address already in use`. Either free the port or set
+  `ENVLOG_PORT`.
+- **`sqlite3 --version` must be 3.27.0 or newer**, the floor for the `VACUUM INTO` in step 2.
+
+Then install per [pi/README.md](../pi/README.md) — the short version:
 
 ```sh
 sudo mkdir -p /opt/envlog /var/lib/envlog /etc/envlog
@@ -165,8 +177,18 @@ Add a static DHCP reservation for the node's MAC, and a local DNS record pointin
 at the Pi's LAN IP. Both are in the Pi-hole admin UI; on v6 they live in `/etc/pihole/pihole.toml`
 rather than the old `dnsmasq.d` snippets.
 
-**Verify:** from a *different* machine on the LAN, `dig +short envlog.home` returns the Pi's
-address, and `curl http://envlog.home:8000/` responds.
+**If the Pi has more than one address, this is the step where that matters.** The service binds
+`0.0.0.0` and answers on all of them, but the name must point at the address reachable from the
+network the *node* joins — on this deployment, the `192.168.50.0/24` side. Pointing it at the
+other interface resolves fine and then times out on every POST.
+
+**Verify:** from a *different* machine **on the node's network**, `dig +short envlog.home`
+returns the Pi's address on that network, and `curl http://envlog.home:8000/` responds.
+
+An empty `dig` here usually means that subnet's DHCP hands out its own resolver rather than the
+Pi, so Pi-hole never sees the query — common when the network belongs to a separate router. Don't
+debug it: set `ingest_host` in [`../esphome/env-node.yaml`](../esphome/env-node.yaml) to the Pi's
+IP and move on. The static reservation above is what keeps that address from changing.
 
 ---
 

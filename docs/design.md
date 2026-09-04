@@ -12,6 +12,12 @@ one disqualifying reason and one supporting one:
 - **RAM.** Grafana's RSS runs 150–280 MB. The Pi 2B has 1 GB total and already runs Pi-hole,
   whose own footprint scales with blocklist size. There isn't room, and the failure mode is the
   whole box thrashing rather than one service degrading.
+
+  **This premise turned out to be wrong.** The box this was deployed on is a 4 GB Pi 4, where
+  Grafana would fit comfortably. The decision stands on the packaging argument below and on the
+  placement-aware dashboard being worth owning — but this bullet is no longer a reason, and
+  should not be recycled as one for rejecting anything else. See
+  [deployment.md](deployment.md#what-the-ram-figure-changes).
 - **ARMv7 packaging.** Grafana still builds 32-bit ARM packages but removed them from the
   download page in ~March 2024, so installing means constructing URLs by hand
   ([grafana#92385](https://github.com/grafana/grafana/issues/92385)). Workable, but it will rot.
@@ -37,9 +43,21 @@ may well serve prebuilt ARM wheels. The workload argument is the durable one.
 Raspberry Pi OS Bookworm marks its system Python externally managed (PEP 668), so a venv is
 required. Do not reach for `--break-system-packages` on a service meant to run for years.
 
-**Target SQLite 3.40**, the version Bookworm ships. A development sandbox may have something much
-newer — don't reach for `STRICT` tables or recent JSON functions that pass locally and fail on
-the Pi.
+**The venv also has to be built on a Python new enough to run this.** `app.py` imports `zoneinfo`
+and the pinned Flask and waitress all require **3.9+**; an older Raspberry Pi OS ships 3.7, where
+the install succeeds and the service then dies at import. `install.sh` checks this up front and
+takes `ENVLOG_PYTHON` to point at a newer interpreter — which is how the deployed box runs, on a
+3.11 built alongside its system 3.7. See [deployment.md](deployment.md#python-311-built-alongside-system-37-untouched).
+
+**Target SQLite 3.27.2**, the version the deployed box ships — not the 3.40 of Bookworm this was
+originally written against. A development sandbox will have something much newer, so the ceiling
+is easy to breach by accident: no `STRICT` tables (3.37), no `RETURNING` (3.35), no `->>` (3.38),
+no `unixepoch()` (3.38), no generated columns (3.31).
+
+`VACUUM INTO`, which the nightly backup depends on, arrived in 3.27.0 — one patch release below
+what is installed. Everything currently in use is comfortably older than that: `ON CONFLICT DO
+NOTHING` is 3.24 and there are no window functions. See
+[deployment.md](deployment.md#sqlite-is-3272-and-that-is-the-real-ceiling).
 
 ---
 
