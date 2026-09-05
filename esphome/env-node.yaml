@@ -244,6 +244,9 @@ sensor:
 
   # --- STEP 6: silent until wired, see the uart: note above --------------------
   - platform: pmsx003
+    # Named so pm-continuous.yaml can override update_interval with !extend
+    # rather than duplicating this file.
+    id: pms
     # PMSX003 is the family: PMS5003, 6003, 7003, A003.
     type: PMSX003
     uart_id: uart_pms

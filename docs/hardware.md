@@ -176,6 +176,13 @@ most of the useful questions ("is this room stuffy by bedtime?") actually depend
   that's a ~10% duty cycle and roughly 2.5 years of laser life instead of eight months.
 - Reports two concentration sets (CF=1 "standard particle" and atmospheric). This project stores
   the atmospheric values — hence the `_atm` column suffix.
+- **A reading of 0 µg/m³ is usually clean air, not a broken sensor.** The mass concentrations are
+  *derived* from particle counts and reported as integers, so a genuinely clean room rounds to
+  zero on all three sizes indefinitely. Confirmed on this hardware 2026-09-05: mass all zero while
+  the same frames carried `PM0.3 Particles: 126 Count/0.1L, PM0.5: 112, PM1.0: 24, PM2.5: 2`.
+  The counts are the proof the laser is working, and they appear in the ESPHome log at DEBUG even
+  though this project does not store them. Check there before suspecting the sensor — a running
+  fan says nothing about the optical path, but a non-zero particle count does.
 
 ---
 
