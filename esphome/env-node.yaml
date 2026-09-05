@@ -6,10 +6,25 @@
 # Needs esphome/secrets.yaml -- copy secrets.yaml.example. First flash is over
 # USB-C with a DATA cable; everything after that is OTA.
 #
-# Bring it up in stages, not all at once. See esphome/README.md; the short
-# version is that the STEP 5/6/7 blocks below are commented markers you can
-# delete downward from, so that a failure has one new variable in it rather than
-# four. Step 4 (I2C scan, no sensors) is its own file: i2c-scan.yaml.
+# Bring it up in stages, not all at once, so a failure has one new variable in it
+# rather than four. Step 4 (I2C scan, no sensors) is its own file: i2c-scan.yaml.
+#
+# Staging this file needs exactly one edit, and only one:
+#
+#   Steps 5 and 6  ->  delete from the `--- STEP 7` marker down (the interval:
+#                      block). Everything above it is safe to flash before the
+#                      PM sensor is wired: with nothing on the UART the pmsx003
+#                      component simply never publishes, PM stays absent from
+#                      the row, and that is the designed behaviour rather than a
+#                      failure. So step 5 (I2C sensors) and step 6 (wire the PM
+#                      sensor, no reflash needed) run off the same image.
+#   Step 7         ->  flash the file entire.
+#
+# `uart:` sits above the sensors because it is a top-level key and pmsx003 is a
+# list item under `sensor:` -- they cannot be made contiguous, so there is no
+# "delete from here down" that isolates the PM sensor without also deleting the
+# two I2C ones. Don't try; leave it in place and wire the hardware when you get
+# to step 6.
 
 substitutions:
   # Device identity, not a room name. Location is tracked server-side as a time
@@ -138,7 +153,9 @@ i2c:
   scl: GPIO20
   scan: true
 
-# --- STEP 6: the PM sensor. Delete from here down for steps 4 and 5. ---------
+# --- STEP 6: the PM sensor's bus. Leave this in place during step 5. ---------
+# Harmless with nothing attached -- the component finds no data on the UART and
+# never publishes, so PM is simply absent until the four jumpers go on.
 uart:
   id: uart_pms
   # ignore_pin_validation_error is NOT hand-waving here. ESPHome validates pins
@@ -208,7 +225,7 @@ sensor:
     humidity:
       id: scd_rh
 
-  # --- STEP 6 ----------------------------------------------------------------
+  # --- STEP 6: silent until wired, see the uart: note above --------------------
   - platform: pmsx003
     # PMSX003 is the family: PMS5003, 6003, 7003, A003.
     type: PMSX003
@@ -230,7 +247,8 @@ sensor:
     pm_10_0:
       id: pm10
 
-# --- STEP 7: start posting. Delete from here down for steps 4, 5 and 6. -------
+# --- STEP 7: start posting. THIS is the one contiguous cut: delete from here
+# down for steps 5 and 6, restore it when the sensors read correctly. ----------
 interval:
   - interval: ${post_interval}
     then:

@@ -29,9 +29,16 @@ laid out so that staging costs nothing but deleting downward from a marked comme
 | Step | Config | Verify |
 | --- | --- | --- |
 | 4 | `i2c-scan.yaml` | Boot log lists **both** `0x62` and `0x77` |
-| 5 | `env-node.yaml`, cut at `--- STEP 6` | Plausible values in the log from each sensor |
-| 6 | `env-node.yaml`, cut at `--- STEP 7` | Fan audible ~30 s, stops, restarts ~5 min later |
+| 5 | `env-node.yaml`, cut at `--- STEP 7` | Plausible values in the log from each I²C sensor |
+| 6 | *(same image — wire the PM sensor, reboot)* | Fan audible ~30 s, stops, restarts ~5 min later |
 | 7 | `env-node.yaml` entire | Rows accumulating on the Pi at the expected cadence |
+
+**`--- STEP 7` is the only contiguous cut, and steps 5 and 6 share one image.** `uart:` is a
+top-level key while `pmsx003` is a list item under `sensor:`, so no single deletion isolates the
+PM sensor without also removing the two I²C ones. It doesn't need isolating: with nothing on the
+UART the component never publishes, PM is simply absent from the row, and that is the designed
+NULL-means-gap behaviour rather than a failure. Wire the jumpers at step 6 and reboot — no
+reflash.
 
 Step 4 is a separate file rather than a marker because it must contain **no sensor components at
 all** — that is what makes an empty scan mean "the port has no power" and nothing else.

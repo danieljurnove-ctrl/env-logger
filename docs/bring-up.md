@@ -225,10 +225,14 @@ see [hardware.md](hardware.md#the-i2c-power-trap).
 
 ## Step 5 — Node: sensors one at a time
 
-Switch to [`esphome/env-node.yaml`](../esphome/env-node.yaml), cut at the `--- STEP 6` marker —
-delete from there down. That leaves `bme280_i2c` and `scd4x` and nothing else. Add them one at a
-time if you prefer: BME280 first, check the log, then SCD-41, whose pressure compensation reads
-the BME280 directly and so needs it present.
+Switch to [`esphome/env-node.yaml`](../esphome/env-node.yaml), **cut at the `--- STEP 7` marker**
+— delete the `interval:` block at the end and flash the rest. The PM sensor's components stay in
+the image and stay silent, because nothing is wired to the UART yet; PM absent from the row is
+the designed behaviour, not a fault.
+
+(There is no cut that removes the PM sensor alone: `uart:` is a top-level key and `pmsx003` is a
+list item under `sensor:`, so deleting from the STEP 6 marker down would take the two I²C sensors
+with it.)
 
 **Verify:** after each addition, plausible values in the log — not zeros, not NaN, and a
 temperature within a couple of degrees of what the room actually feels like.
@@ -242,9 +246,10 @@ OTA works from here on; no more cable.
 Last, because it needs the four jumpers and because it's the one that can be mis-wired
 destructively. Double-check **VCC goes to `USB`, not `3V`** before powering on.
 
-Restore the `uart:` and `pmsx003` blocks — `env-node.yaml` cut at the `--- STEP 7` marker
-instead. `update_interval` is already `5min` there: strictly greater than 30 s, or the duty
-cycling silently doesn't happen.
+**No reflash needed** — the PM components are already in the step 5 image, waiting for something
+to appear on the UART. Wire the four jumpers, reboot the node, and it starts publishing.
+`update_interval` is already `5min`: strictly greater than 30 s, or the duty cycling silently
+doesn't happen.
 
 **Verify:** the fan is audible for about 30 seconds, then stops, then restarts about five minutes
 later. Values appear once per cycle, not continuously.
