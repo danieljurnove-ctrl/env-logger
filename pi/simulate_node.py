@@ -74,6 +74,24 @@ def build_reading(t: float, boot_count: int, send_pm: bool) -> dict:
         body["pm2_5_atm"] = round(pm25, 1)
         body["pm10_atm"] = round(pm10, 1)
 
+        # Counts per 0.1 L, cumulative and therefore non-increasing with size.
+        # Generated from the mass figures rather than independently, so the
+        # simulator cannot emit a combination the real sensor never would --
+        # and so the server's ordering check sees valid data here and only
+        # fires on genuinely bad frames.
+        c0_3 = 40 + pm25 * 55 + abs(random.gauss(0, 12))
+        c0_5 = c0_3 * random.uniform(0.75, 0.92)
+        c1_0 = c0_5 * random.uniform(0.15, 0.30)
+        c2_5 = c1_0 * random.uniform(0.04, 0.14)
+        c5_0 = c2_5 * random.uniform(0.0, 0.40)
+        c10 = c5_0 * random.uniform(0.0, 0.50)
+        body["pm0_3_count"] = float(round(c0_3))
+        body["pm0_5_count"] = float(round(c0_5))
+        body["pm1_0_count"] = float(round(c1_0))
+        body["pm2_5_count"] = float(round(c2_5))
+        body["pm5_0_count"] = float(round(c5_0))
+        body["pm10_count"] = float(round(c10))
+
     return body
 
 
@@ -193,7 +211,9 @@ def backfill(db_path: str, hours: float) -> int:
             columns = (
                 "node_id", "ts", "bme_temp_c", "bme_rh_pct", "pressure_hpa",
                 "scd_temp_c", "scd_rh_pct", "co2_ppm",
-                "pm1_0_atm", "pm2_5_atm", "pm10_atm", "boot_count",
+                "pm1_0_atm", "pm2_5_atm", "pm10_atm",
+                "pm0_3_count", "pm0_5_count", "pm1_0_count",
+                "pm2_5_count", "pm5_0_count", "pm10_count", "boot_count",
             )
             rows, written, last_pm = [], 0, start - PM_EVERY
             for ts in range(start, now, int(SAMPLE_INTERVAL)):

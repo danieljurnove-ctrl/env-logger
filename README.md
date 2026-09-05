@@ -95,7 +95,11 @@ hardware doc:
 ## What it records
 
 Temperature, relative humidity, and barometric pressure (BME280); CO₂, plus a second
-independent temperature and humidity (SCD-41); PM1.0, PM2.5 and PM10 (PMS5003).
+independent temperature and humidity (SCD-41); PM1.0, PM2.5 and PM10 mass, plus particle counts
+at 0.3, 0.5, 1.0, 2.5, 5.0 and 10 µm (PMS5003).
+
+The counts matter more than they look. Mass is derived from them and reported as an integer, so a
+clean room reads 0 µg/m³ on every size for hours while the counts move over hundreds.
 
 Because the node is portable, **location is tracked as a time interval, not as a property of the
 node**. The node identifies the device (`feather-01`); a `placements` table records which room

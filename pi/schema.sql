@@ -64,6 +64,17 @@ CREATE TABLE IF NOT EXISTS readings (
   pm1_0_atm    REAL,
   pm2_5_atm    REAL,
   pm10_atm     REAL,
+  -- Particle counts per 0.1 L, cumulative: every particle counted at 0.5um is
+  -- also counted at 0.3um. Stored alongside mass because mass is derived from
+  -- these and reported as an integer, so a clean room reads 0.0 ug/m3 on all
+  -- three sizes for hours while the counts move over hundreds. The counts are
+  -- what answer "is this room dustier than that one" indoors.
+  pm0_3_count  REAL,
+  pm0_5_count  REAL,
+  pm1_0_count  REAL,
+  pm2_5_count  REAL,
+  pm5_0_count  REAL,
+  pm10_count   REAL,
   boot_count   INTEGER,
   PRIMARY KEY (node_id, ts)
 );

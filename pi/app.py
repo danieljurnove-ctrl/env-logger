@@ -49,6 +49,14 @@ SENSOR_RANGES = {
     "pm1_0_atm": (0.0, 1000.0),
     "pm2_5_atm": (0.0, 1000.0),
     "pm10_atm": (0.0, 1000.0),
+    # Counts per 0.1 L. The sensor sends these as unsigned 16-bit, so 65535 is
+    # the ceiling it can express rather than a plausibility judgement.
+    "pm0_3_count": (0.0, 65535.0),
+    "pm0_5_count": (0.0, 65535.0),
+    "pm1_0_count": (0.0, 65535.0),
+    "pm2_5_count": (0.0, 65535.0),
+    "pm5_0_count": (0.0, 65535.0),
+    "pm10_count": (0.0, 65535.0),
 }
 SENSOR_COLUMNS = tuple(SENSOR_RANGES)
 READING_COLUMNS = ("node_id", "ts") + SENSOR_COLUMNS + ("boot_count",)
@@ -222,6 +230,20 @@ def _validate(payload: object) -> tuple[str, dict]:
     pm = [values["pm1_0_atm"], values["pm2_5_atm"], values["pm10_atm"]]
     if all(v is not None for v in pm) and not (pm[0] <= pm[1] <= pm[2]):
         values["pm1_0_atm"] = values["pm2_5_atm"] = values["pm10_atm"] = None
+
+    # Counts run the other way: they are cumulative "at least this size", so
+    # every particle counted at 0.5um was already counted at 0.3um and the
+    # series must be non-increasing. Same reasoning as above -- an ordering that
+    # cannot physically happen means the frame is not trustworthy, so drop the
+    # set rather than record it.
+    count_columns = (
+        "pm0_3_count", "pm0_5_count", "pm1_0_count",
+        "pm2_5_count", "pm5_0_count", "pm10_count",
+    )
+    counts = [values[c] for c in count_columns]
+    if all(v is not None for v in counts) and any(a < b for a, b in zip(counts, counts[1:])):
+        for c in count_columns:
+            values[c] = None
 
     return node.strip(), values
 

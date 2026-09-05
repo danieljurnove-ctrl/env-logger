@@ -118,10 +118,23 @@ CREATE TABLE readings (
   pm1_0_atm    REAL,
   pm2_5_atm    REAL,
   pm10_atm     REAL,
+  pm0_3_count  REAL,                 -- particles per 0.1 L, cumulative by size
+  pm0_5_count  REAL,
+  pm1_0_count  REAL,
+  pm2_5_count  REAL,
+  pm5_0_count  REAL,
+  pm10_count   REAL,
   boot_count   INTEGER,              -- move detection only
   PRIMARY KEY (node_id, ts)
 );
 ```
+
+**Particle counts are stored as well as mass**, all six channels the sensor reports. Mass is
+derived from these and rounded to an integer, so indoors it reads 0 µg/m³ for hours while the
+counts move over hundreds — the counts are what distinguish one room from another at household
+concentrations. The CF=1 "standard particle" mass set is deliberately not stored: it is the same
+measurement under a different calibration curve, identical to the atmospheric set except at
+concentrations this project will never see indoors.
 
 **Both the BME280 and the SCD-41 report temperature and humidity**, so the columns are named per
 sensor. A single `temp_c` column would silently discard one of them — and the SCD-41's own
@@ -313,7 +326,10 @@ Auth is a shared secret in an `X-Auth-Token` header.
 
 ### Data hygiene
 
-- Enforce `pm1_0 ≤ pm2_5 ≤ pm10`; reject implausible values.
+- Enforce `pm1_0 ≤ pm2_5 ≤ pm10` on mass, and the reverse on counts: they are cumulative
+  "at least this size", so `pm0_3 ≥ pm0_5 ≥ … ≥ pm10`. Either ordering violated means the frame
+  is untrustworthy, so that whole set is dropped — not the row.
+- Reject implausible values.
 - A failed sensor NULLs its own columns — never drop the whole row. If the SCD-41 times out on
   I²C while the BME280 responds, that reading is still worth keeping.
 - Render NULL as a gap, not as a line connected across it.

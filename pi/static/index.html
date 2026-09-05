@@ -95,6 +95,11 @@
   <section class="panel"><h2>Pressure <span class="unit">(hPa)</span></h2><div class="chart" id="c-press"></div></section>
   <section class="panel"><h2>Particulates <span class="unit">(µg/m³)</span></h2><div class="chart" id="c-pm"></div></section>
 
+  <!-- The counts the mass figures above are derived from. Indoors the mass
+       rounds to 0 for hours while these move over hundreds, so this is the
+       chart that actually distinguishes one room from another. -->
+  <section class="panel"><h2>Particle counts <span class="unit">(per 0.1 L)</span></h2><div class="chart" id="c-counts"></div></section>
+
   <section class="panel">
     <h2>Placement history</h2>
     <div class="table-wrap"><table id="placements"><tbody></tbody></table></div>
@@ -109,7 +114,9 @@
 // whole dashboard silently 401s without it.
 const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 const METRICS = ["co2_ppm","bme_temp_c","scd_temp_c","bme_rh_pct","scd_rh_pct",
-                 "pressure_hpa","pm1_0_atm","pm2_5_atm","pm10_atm"];
+                 "pressure_hpa","pm1_0_atm","pm2_5_atm","pm10_atm",
+                 "pm0_3_count","pm0_5_count","pm1_0_count",
+                 "pm2_5_count","pm5_0_count","pm10_count"];
 
 // Ranges carry their own bucket: raw 45-second data over 30 days is ~58k points,
 // which is a slow chart and an unreadable one.
@@ -336,6 +343,14 @@ async function refreshSeries() {
     [{metric:"pm1_0_atm", label:"PM1.0"}, {metric:"pm2_5_atm", label:"PM2.5"},
      {metric:"pm10_atm", label:"PM10"}],
     ["#a78bfa","#f472b6","#fb923c"], series);
+  // All six the sensor reports. The coarse ones sit at zero indoors, which is
+  // information rather than clutter -- and uPlot's legend toggles series, so
+  // anything you don't want is one click away.
+  drawChart("counts", $("c-counts"),
+    [{metric:"pm0_3_count", label:"≥0.3µm"}, {metric:"pm0_5_count", label:"≥0.5µm"},
+     {metric:"pm1_0_count", label:"≥1.0µm"}, {metric:"pm2_5_count", label:"≥2.5µm"},
+     {metric:"pm5_0_count", label:"≥5.0µm"}, {metric:"pm10_count", label:"≥10µm"}],
+    ["#a78bfa","#38bdf8","#4ade80","#fbbf24","#f472b6","#f87171"], series);
 }
 
 async function refreshRooms() {

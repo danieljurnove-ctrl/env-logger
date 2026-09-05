@@ -266,6 +266,22 @@ sensor:
           - lambda: id(fresh_pm) = true;
     pm_10_0:
       id: pm10
+    # Counts per 0.1 L, cumulative by size. Worth storing because the mass
+    # figures above are derived from these and rounded to integers, so indoors
+    # they sit at 0 for hours while these move over hundreds -- see
+    # docs/hardware.md#pms5003.
+    pm_0_3um:
+      id: pm0_3_count
+    pm_0_5um:
+      id: pm0_5_count
+    pm_1_0um:
+      id: pm1_0_count
+    pm_2_5um:
+      id: pm2_5_count
+    pm_5_0um:
+      id: pm5_0_count
+    pm_10_0um:
+      id: pm10_count
 
 # --- STEP 7: start posting. THIS is the one contiguous cut: delete from here
 # down for steps 5 and 6, restore it when the sensors read correctly. ----------
@@ -308,6 +324,12 @@ interval:
                     if (!std::isnan(id(pm1_0).state)) root["pm1_0_atm"] = id(pm1_0).state;
                     if (!std::isnan(id(pm2_5).state)) root["pm2_5_atm"] = id(pm2_5).state;
                     if (!std::isnan(id(pm10).state))  root["pm10_atm"]  = id(pm10).state;
+                    if (!std::isnan(id(pm0_3_count).state)) root["pm0_3_count"] = id(pm0_3_count).state;
+                    if (!std::isnan(id(pm0_5_count).state)) root["pm0_5_count"] = id(pm0_5_count).state;
+                    if (!std::isnan(id(pm1_0_count).state)) root["pm1_0_count"] = id(pm1_0_count).state;
+                    if (!std::isnan(id(pm2_5_count).state)) root["pm2_5_count"] = id(pm2_5_count).state;
+                    if (!std::isnan(id(pm5_0_count).state)) root["pm5_0_count"] = id(pm5_0_count).state;
+                    if (!std::isnan(id(pm10_count).state))  root["pm10_count"]  = id(pm10_count).state;
                   }
                 on_error:
                   then:
