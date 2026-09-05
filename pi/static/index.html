@@ -21,8 +21,20 @@
   .liveness.live { color:var(--ok) }
   .where { color:var(--dim) }
   .spacer { flex:1 }
-  main { padding:18px; display:grid; gap:18px; max-width:1100px; margin:0 auto }
-  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px }
+  /* minmax(0,1fr), not the implicit auto column: a grid track sized to `auto`
+     takes the min-content width of its widest item, so the placement table's
+     date inputs stretched the track and every panel with it -- pushing the whole
+     page wider than a phone viewport. The charts then measured that inflated
+     width and grew to match, which is what made it look like they suddenly
+     jumped past the edge. min-width:0 on the panel is the same fix one level
+     down: grid and flex children default to min-width:auto. */
+  main { padding:18px; display:grid; grid-template-columns:minmax(0,1fr);
+         gap:18px; max-width:1100px; margin:0 auto }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+           padding:14px; min-width:0 }
+  /* The placement table cannot shrink below its date inputs, so let it scroll
+     inside the panel rather than widen the document. */
+  .table-wrap { overflow-x:auto }
   .panel h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em;
               color:var(--dim); margin:0 0 10px }
   /* CSS uppercasing turns the micro sign into Greek capital Mu, which reads as
@@ -85,7 +97,7 @@
 
   <section class="panel">
     <h2>Placement history</h2>
-    <table id="placements"><tbody></tbody></table>
+    <div class="table-wrap"><table id="placements"><tbody></tbody></table></div>
     <div class="msg" id="histMsg"></div>
   </section>
 </main>

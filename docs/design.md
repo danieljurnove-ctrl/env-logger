@@ -345,6 +345,13 @@ size cap is not.
 One self-contained HTML page reading `GET /api/series`, in the same spirit as a single-file app:
 no build step, no framework.
 
+**It has to work in portrait on a phone**, because that is where it gets read once Tailscale is
+up — standing in the room you are asking about. The layout constraint that matters: the panels
+live in a CSS grid whose track is `minmax(0, 1fr)`, not the implicit `auto`. An `auto` track takes
+the min-content width of its widest item, so one unshrinkable child (the placement table, with its
+date inputs) widens every panel and pushes the page past the viewport — and the charts, which size
+themselves from their container, then grow to match and overflow visibly.
+
 Vendor [uPlot](https://github.com/leeoniya/uPlot) (~40 KB, built for exactly this shape of data)
 rather than hand-rolling canvas or pulling a CDN dependency onto a box that may have no route to
 the internet.
