@@ -131,10 +131,23 @@ untouched.
 
 The Pi is dual-homed:
 
-| Interface | Address |
-| --- | --- |
-| `eth0` | `10.0.0.254/8` |
-| `wlan0` | `192.168.50.254/24` |
+| Interface | Address | |
+| --- | --- | --- |
+| `eth0` | `10.0.0.254/8` | static, in `/etc/dhcpcd.conf` |
+| `wlan0` | `192.168.50.254/24` | static, in `/etc/dhcpcd.conf` |
+
+The router's DHCP pool on the WiFi side is **`192.168.50.100`–`.250`**, so `.254` sits outside it
+and cannot be handed to anything else. That is what makes the hand-written `envlog.home` record
+safe: the address it points at is pinned at both ends.
+
+Three things in `dhcpcd.conf` are wrong but currently harmless, and will bite whoever edits it
+next:
+
+- The `wlan0` block has `static router=` and `static domain_name_server=` — both singular, both
+  not real dhcpcd options, both silently ignored. The address itself is correct, which is why WiFi
+  works; the route and DNS come from `eth0`.
+- That ignored DNS value is `192.168.1.254`, an address on a subnet this network does not have.
+- There are **two** `interface eth0` blocks with conflicting settings. The `/8` one wins.
 
 The ingest service binds `0.0.0.0`, so it answers on both. But
 [step 3](bring-up.md#step-3--pi-hole-naming) points `envlog.home` at **one** address, and it has
