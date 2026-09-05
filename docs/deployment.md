@@ -152,8 +152,11 @@ will never see the query, and the name will not resolve no matter what is config
 Step 3's verify catches this: `dig +short envlog.home` **from a machine on the 192 network**, not
 from the Pi. If it comes back empty, the fix is one line rather than an investigation — set
 `ingest_host: 192.168.50.254` in [`esphome/env-node.yaml`](../esphome/env-node.yaml) and skip DNS
-altogether. That costs nothing except having to edit the config if the Pi's address ever changes,
-which is what the DHCP reservation in step 3 exists to prevent.
+altogether. That costs nothing except having to edit the config if the Pi's address ever changes.
+
+**The Pi's address is the one worth pinning** — by reservation or static config. `envlog.home` is
+a hand-written record pointing at `192.168.50.254`, so the name breaks silently if that moves. The
+node's own address does not matter: it initiates every POST, and OTA reaches it by mDNS name.
 
 (The `/8` on `eth0` is unusual — the Pi treats all of `10.x.x.x` as local — but nothing here
 depends on it.)

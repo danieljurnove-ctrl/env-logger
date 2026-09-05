@@ -173,8 +173,16 @@ short as possible.
 
 ## Step 3 — Pi-hole: naming
 
-Add a static DHCP reservation for the node's MAC, and a local DNS record pointing `envlog.home`
-at the Pi's LAN IP. Both are in the Pi-hole admin UI; on v6 they live in `/etc/pihole/pihole.toml`
+Add a local DNS record pointing `envlog.home` at the Pi's LAN IP, and **make sure the Pi's own
+address cannot change** — a reservation on whatever serves DHCP, or a static address on the Pi.
+That record is written by hand, so if the Pi's address moves, the name silently points at nothing
+and every POST fails.
+
+**The node's address does not need pinning**, despite what this step used to say. Nothing connects
+*to* the node: it initiates every POST, and OTA and `esphome logs` reach it by mDNS name
+(`feather-01.local`), not by address. A changed lease costs nothing. Pin it only if mDNS is
+unreliable on your machine, in which case `use_address:` in the node config is the more direct
+fix. Both are in the Pi-hole admin UI; on v6 they live in `/etc/pihole/pihole.toml`
 rather than the old `dnsmasq.d` snippets.
 
 **If the Pi has more than one address, this is the step where that matters.** The service binds
