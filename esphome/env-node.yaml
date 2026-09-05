@@ -171,6 +171,23 @@ uart:
     number: GPIO8
     ignore_pin_validation_error: true
   baud_rate: 9600
+  # Uncomment to diagnose a silent PM sensor, then flash and watch the log. It
+  # prints every byte in both directions, which answers the only two questions
+  # worth asking -- is the node transmitting, and is anything coming back --
+  # without swapping jumpers and hoping.
+  #
+  #   >>> ...  the node commanding the sensor. Present means tx_pin works.
+  #   <<< 42 4D ...  a frame from the sensor; 0x42 0x4D is its start marker.
+  #                  Present means rx_pin and the sensor's TX line work.
+  #
+  # Nothing in either direction with the fan running is a wiring fault, not a
+  # config one. Re-comment when you are done; it is far too noisy to leave on.
+  #
+  # debug:
+  #   direction: BOTH
+  #   dummy_receiver: false
+  #   sequence:
+  #     - lambda: UARTDebug::log_hex(direction, bytes, ' ');
 
 sensor:
   # --- STEP 5a ---------------------------------------------------------------
