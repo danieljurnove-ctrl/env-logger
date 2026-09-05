@@ -204,7 +204,18 @@ the GPIO2 power switch and the `i2c:` bus with `scan` on, and **no sensor compon
 & $HOME\.venvs\esphome\Scripts\esphome.exe run esphome\i2c-scan.yaml
 ```
 
-**Verify:** the boot log lists **both** `0x62` (SCD-41) and `0x77` (BME280).
+**Verify:** the boot log lists **both** `0x62` (SCD-41) and `0x77` (BME280):
+
+```
+[C][i2c.idf:113]: Results from bus scan:
+[C][i2c.idf:119]: Found device at address 0x62
+[C][i2c.idf:119]: Found device at address 0x77
+```
+
+Those are `[C]` — **CONFIG** level. ESPHome's levels run `ERROR < WARN < INFO < CONFIG < DEBUG`,
+so a `logger: level: INFO` suppresses them entirely and the scan looks like it never ran. Sensor
+readings in step 5 are `[D]`, one level further out again. Keep the logger at `DEBUG` until step 7
+passes.
 
 This is the step that catches the GPIO2 trap, and it's why nothing else is configured yet. If the
 scan finds nothing, the problem is power to the STEMMA QT port, not your sensor configuration —

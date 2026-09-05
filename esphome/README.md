@@ -69,6 +69,11 @@ Two more that are only obvious in hindsight:
   component is here only so `esphome logs` works once the cable is off.
 - **`request_headers:`, not `headers:`.** The key was renamed; the old name is now a hard
   validation error, and most examples still online use it.
+- **The logger must stay at `DEBUG` through bring-up.** ESPHome's levels run
+  `ERROR < WARN < INFO < CONFIG < DEBUG`, so `INFO` is *more* restrictive than it looks: the I²C
+  scan is logged at CONFIG and sensor readings at DEBUG. Setting `INFO` suppresses both and
+  leaves a node that looks dead while working perfectly — which is exactly what happened on the
+  first flash here.
 
 ---
 

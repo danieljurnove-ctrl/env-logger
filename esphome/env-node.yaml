@@ -60,7 +60,14 @@ wifi:
 logger:
   # The boot log is how every bring-up step below is verified. Over USB at
   # 115200; over the network once api: is reachable.
-  level: INFO
+  #
+  # DEBUG, not INFO, and that is load-bearing during bring-up: sensor readings
+  # are logged with ESP_LOGD and the I2C scan with ESP_LOGCONFIG, both of which
+  # `level: INFO` suppresses -- leaving a node that looks silent while working
+  # perfectly. Levels run ERROR < WARN < INFO < CONFIG < DEBUG.
+  #
+  # Drop to INFO once steps 4-7 pass, if the log noise bothers you.
+  level: DEBUG
 
 api:
   # No Home Assistant here -- this exists so `esphome logs` works over the

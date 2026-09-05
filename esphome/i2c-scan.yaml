@@ -8,8 +8,9 @@
 #
 # Verify: the boot log lists BOTH devices --
 #
-#   [i2c:096] Found i2c device at address 0x62   (SCD-41)
-#   [i2c:096] Found i2c device at address 0x77   (BME280)
+#   [C][i2c.idf:113]: Results from bus scan:
+#   [C][i2c.idf:119]: Found device at address 0x62   (SCD-41)
+#   [C][i2c.idf:119]: Found device at address 0x77   (BME280)
 #
 # Neither one found is almost always GPIO2, not your wiring: the STEMMA QT port
 # runs off a regulator gated by that pin, and under ESPHome's esp-idf framework
@@ -34,7 +35,11 @@ wifi:
   password: !secret wifi_password
 
 logger:
-  level: INFO
+  # MUST be at least CONFIG. The scan results are logged with ESP_LOGCONFIG, and
+  # ESPHome's levels run ERROR < WARN < INFO < CONFIG < DEBUG -- so `level: INFO`
+  # is not "less chatty", it silently suppresses the entire reason this config
+  # exists. The bus is scanned either way; you just never see the answer.
+  level: DEBUG
 
 api:
   # 0s or the node reboots every 15 minutes waiting for a Home Assistant that
