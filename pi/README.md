@@ -154,5 +154,9 @@ has to cope with.
 ## Tests
 
 ```sh
-python -m pytest pi/test_app.py -q
+python -m pytest pi -q
 ```
+
+`test_dashboard.py` runs the dashboard's gap-detection JavaScript through `node`, and skips
+cleanly when node is absent — so a Pi without it still runs everything else. Don't name a single
+test file on the command line; that is how a test stops being run without anyone noticing.

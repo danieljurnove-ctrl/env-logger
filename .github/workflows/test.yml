@@ -24,7 +24,10 @@ jobs:
 
       - name: Run tests
         working-directory: pi
-        run: python -m pytest test_app.py -q
+        # The whole directory, not one file by name: naming test_app.py meant
+        # test_dashboard.py was silently never collected, and CI stayed green
+        # while the test it was added to run did not exist as far as CI knew.
+        run: python -m pytest -q
 
   shell:
     runs-on: ubuntu-latest
