@@ -4,6 +4,28 @@ Decisions and the reasoning behind them, so the code phases are execution rather
 
 ---
 
+## Purpose
+
+**Short-term comparison between rooms in one house.** Is the bedroom stuffier than the office by
+bedtime; does the kitchen recover after cooking; is this room worse than that one this week.
+
+It is not a long-term archive. That distinction is load-bearing in more places than it looks:
+
+- **Backups are not configured**, and that is a decision rather than an omission. Losing a few
+  weeks of stale room comparisons costs nothing worth defending against.
+- **Retention needs no thought.** Full resolution forever is simplest and the data is small; it
+  just isn't a feature anyone is relying on.
+- **Absolute CO₂ accuracy barely matters.** The SCD-41's self-calibration may never converge on a
+  node that gets unplugged for every room move (see
+  [hardware.md](hardware.md#scd-41)) — and for every question above, the relative trend is the
+  answer. This turns the project's most uncertain hardware question into a non-issue.
+
+What *does* matter, given that purpose: correct room attribution (a trend drawn across a move is
+a lie), honest gaps rather than fabricated continuity, and a dashboard that segments by placement.
+All three are what the rest of this document is about.
+
+---
+
 ## Why not Grafana
 
 The original sketch had Grafana on port 3000 with the SQLite datasource plugin. It's out, for
@@ -117,9 +139,10 @@ forecloses rowid-based tooling for nothing.
 
 ### Size
 
-About 100 bytes per row. At a 45-second cadence that's roughly **70 MB/year**, or ~350 MB over
-five years for one node. Small enough that keeping everything at full resolution forever is the
-simplest correct answer.
+About 100 bytes per row. At a 45-second cadence that's roughly **70 MB/year** for one node. Even
+left running for years unattended it stays small enough that keeping everything at full
+resolution is the simplest correct answer — and against the actual usage in
+[Purpose](#purpose), the question never comes up at all.
 
 ### What we deliberately don't do
 
@@ -127,7 +150,8 @@ An earlier draft specified a 90-day retention window, an hourly rollup table, a 
 populate it, incremental auto-vacuum, and dashboard logic to switch between raw and rolled-up
 data by time range. All of it is gone.
 
-The sizing above is why: 350 MB over five years doesn't need managing. The rollup existed to make
+The sizing above is why: a few hundred MB over several years doesn't need managing. The rollup
+existed to make
 queries fast that were never going to be slow, and it introduced a genuinely dangerous failure
 mode — with raw data deleted at 90 days and the rollup as the only permanent record, a rollup job
 that silently breaks destroys history irrecoverably.
@@ -187,9 +211,14 @@ minute of readings lost on an unclean shutdown.
 
 ## Backups
 
-The stated purpose is multi-year trends. The storage medium is an SD card in a Pi — the most
-failure-prone component in the system, with a wear-out mode that the batching above exists to
-slow down. Accepting gaps in the record is not the same as accepting the loss of all of it.
+**Not configured on this deployment, deliberately** — see [Purpose](#purpose). Backing up a
+rolling few weeks of room comparisons is not worth a scheduled job and somewhere to put it, and
+`ENVLOG_BACKUP_DEST` being unset means `backup.sh` warns and exits 0 rather than pretending.
+
+The machinery below ships anyway, because the moment the archive *is* worth something the SD card
+is the most failure-prone component in the system, and the batching above exists to slow down a
+wear-out mode that still ends in the card dying. Setting one line in `/etc/envlog/backup.conf`
+turns it on; nothing needs reinstalling.
 
 Nightly:
 

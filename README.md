@@ -4,6 +4,12 @@ Home air quality and environmental logging. A portable WiFi sensor node carried 
 room posts readings to an always-on Raspberry Pi, which stores them in SQLite and serves trend
 graphs viewable from anywhere over Tailscale.
 
+**The goal is short-term comparison between rooms** — is the bedroom stuffier than the office by
+bedtime, does the kitchen recover after cooking — not a long-term archive. That is why there are
+no backups configured, why absolute CO₂ accuracy matters less than the relative trend, and why
+correct room attribution matters more than either. See
+[docs/design.md](docs/design.md#purpose).
+
 > **Status: hardware in hand, bring-up in progress.** The Pi service and the node firmware are
 > both written and pass their checks off-hardware; nothing has been verified against real sensors
 > yet. [docs/bring-up.md](docs/bring-up.md) is the ordered checklist for doing that.
@@ -135,7 +141,10 @@ Stated up front, because most of these are deliberate.
   against ~45 seconds for the other metrics.
 - **Absolute CO₂ may not be trustworthy on a portable node.** The SCD-41's automatic
   self-calibration needs days of continuous running, and every room move power-cycles it. See
-  the hardware doc; relative trends are fine regardless.
+  the hardware doc. Relative trends are unaffected, which is what the questions above actually
+  need — so this is a caveat rather than a problem here.
+- **No backups.** Deliberate: see [Purpose](docs/design.md#purpose). The nightly job ships and
+  is one config line away if that ever changes.
 - **Pi-hole is a dependency for ingest.** The node resolves `envlog.home` through it, so a
   Pi-hole outage stops data collection. Setting `ingest_host` to the Pi's IP in the node config
   removes the dependency entirely, at the cost of having to edit it if that address changes.
