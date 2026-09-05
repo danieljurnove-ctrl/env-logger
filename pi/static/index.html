@@ -140,20 +140,42 @@ function ago(seconds) {
 
 // ---------------------------------------------------------------- rendering
 
+/* Bucket width in seconds for the selected range. "day" is nominal -- local days
+   are 23 or 25 hours twice a year, which is irrelevant to a gap threshold. */
+function bucketSeconds() {
+  return range.bucket === "day" ? 86400 : Number(range.bucket);
+}
+
 /* One flat [xs, ...ys] per chart, with a null row inserted between placements.
    uPlot leaves a gap wherever y is null, which is what makes a move break the
-   line instead of drawing a slope between two rooms that never happened. */
+   line instead of drawing a slope between two rooms that never happened.
+
+   A null goes in for a run of empty buckets too. Readings stop whenever WiFi or
+   Pi-hole does, and those gaps are accepted by design -- but drawing a straight
+   line across one states that the room did nothing in between, which is the same
+   lie as drawing a slope across a move. The threshold is deliberately loose:
+   buckets are aligned, so a present run steps by exactly one bucket, and at the
+   6h range (60s buckets against a 45s cadence) a bucket lands empty as a matter
+   of routine. Only three or more consecutive empty buckets break the line. */
 function toData(segments, wanted, columns) {
   const idx = wanted.map(m => columns.indexOf(m));
   const xs = [], ys = wanted.map(() => []);
+  const step = bucketSeconds();
+  const maxGap = step * 3.5;
   segments.forEach((seg, i) => {
     if (i > 0 && seg.rows.length) {
       xs.push(seg.rows[0][0] - 0.5);
       ys.forEach(a => a.push(null));
     }
+    let prev = null;
     for (const row of seg.rows) {
+      if (prev !== null && row[0] - prev > maxGap) {
+        xs.push(prev + step / 2);
+        ys.forEach(a => a.push(null));
+      }
       xs.push(row[0]);
       idx.forEach((c, j) => ys[j].push(c < 0 ? null : row[c]));
+      prev = row[0];
     }
   });
   return [xs, ...ys];
