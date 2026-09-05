@@ -291,6 +291,12 @@ does.
   compared against each other without cross-sensor error.
 - **Flag the first few minutes of a placement as settling** — the BME280 needs to thermalise and
   the PM fan needs to spin up.
+- **An outage breaks the line too.** Readings stop whenever WiFi or Pi-hole does, and those gaps
+  are accepted — but drawing a straight line across one asserts the room did nothing in between,
+  which is the same lie as drawing a slope across a move. The dashboard inserts a null after three
+  or more consecutive empty buckets. The threshold is loose on purpose: buckets are aligned, and
+  at the 6h range 60-second buckets against a 45-second cadence leave one empty as a matter of
+  routine.
 
 ---
 
