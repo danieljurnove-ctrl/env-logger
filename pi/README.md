@@ -38,6 +38,11 @@ it:
 sudo ENVLOG_PYTHON=python3.11 bash pi/install.sh
 ```
 
+**Only the first time.** After that the venv exists and the installer reuses the interpreter it
+was built on, so updating is a plain `git pull && sudo bash pi/install.sh` with nothing to
+remember. `ENVLOG_PYTHON` still overrides when set, which is how you'd move to a newer
+interpreter later.
+
 `install.sh` checks the version up front and refuses rather than leaving you with a venv that
 fails at first start.
 

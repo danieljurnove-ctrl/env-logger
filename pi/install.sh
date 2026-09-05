@@ -23,7 +23,18 @@ SERVICE_USER="${ENVLOG_USER:-envlog}"
 #
 #   sudo ENVLOG_PYTHON=python3.11 bash pi/install.sh
 #
-PYTHON="${ENVLOG_PYTHON:-python3}"
+# Only needed the first time. After that the venv already exists and we reuse
+# the interpreter it was built on, so updates are a plain re-run -- otherwise
+# every future `git pull && install.sh` fails on the system python again and the
+# fix is a variable you have to remember from months ago.
+PYTHON="${ENVLOG_PYTHON:-}"
+if [[ -z "$PYTHON" ]]; then
+  if [[ -x "$PREFIX/.venv/bin/python" ]]; then
+    PYTHON="$PREFIX/.venv/bin/python"
+  else
+    PYTHON="python3"
+  fi
+fi
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -104,5 +115,10 @@ echo
 log "done. Your token (needed to open the dashboard):"
 grep -oP '^ENVLOG_TOKEN=\K.*' "$CONF_DIR/envlog.env"
 echo
-log "dashboard: http://$(hostname -I | awk '{print $1}'):$port/"
+# Every address, not just the first: a box with both Ethernet and WiFi answers
+# on all of them, and `hostname -I` puts them in an order that has nothing to do
+# with which one you can actually reach it on.
+for ip in $(hostname -I); do
+  log "dashboard: http://$ip:$port/"
+done
 log "next: set ENVLOG_BACKUP_DEST in $CONF_DIR/backup.conf"

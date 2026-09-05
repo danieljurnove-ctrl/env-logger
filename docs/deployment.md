@@ -60,6 +60,9 @@ sudo make altinstall
 sudo ENVLOG_PYTHON=python3.11 bash pi/install.sh
 ```
 
+`ENVLOG_PYTHON` is needed on that first install only. Afterwards the installer reuses the
+interpreter the venv was built on, so updates are `git pull && sudo bash pi/install.sh`.
+
 No `--enable-optimizations`: PGO turns a ~25-minute build into a multi-hour one by running the
 test suite for profiling, and buys perhaps 10–20% interpreter speed — meaningless for a service
 handling one request every 45 seconds.
