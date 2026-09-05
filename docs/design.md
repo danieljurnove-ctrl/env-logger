@@ -326,6 +326,11 @@ Auth is a shared secret in an `X-Auth-Token` header.
 Roughly ten lines of code, and without it a dead node is discovered whenever you next happen to
 open the page — which for a portable sensor that's often unplugged is a real risk.
 
+**Units.** Store Celsius, display Fahrenheit. The sensors report Celsius, the API returns it, and
+the archive holds it; the dashboard converts when it draws. Keeping the conversion at the display
+edge means changing your mind is a refresh rather than a migration of every historical row — and
+the same argument as the BME280 offset: don't bake a presentation decision into stored data.
+
 **Timezones.** Store UTC. The API takes an explicit IANA timezone and does local-day grouping at
 query time. "Overnight CO₂" and "this week versus last" are local-time questions, and two days a
 year the local day is 23 or 25 hours long.

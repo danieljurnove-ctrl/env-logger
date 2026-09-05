@@ -90,7 +90,7 @@
   </section>
 
   <section class="panel"><h2>CO₂ <span class="unit">(ppm)</span></h2><div class="chart" id="c-co2"></div></section>
-  <section class="panel"><h2>Temperature <span class="unit">(°C)</span></h2><div class="chart" id="c-temp"></div></section>
+  <section class="panel"><h2>Temperature <span class="unit">(°F)</span></h2><div class="chart" id="c-temp"></div></section>
   <section class="panel"><h2>Relative humidity <span class="unit">(%)</span></h2><div class="chart" id="c-rh"></div></section>
   <section class="panel"><h2>Pressure <span class="unit">(hPa)</span></h2><div class="chart" id="c-press"></div></section>
   <section class="panel"><h2>Particulates <span class="unit">(µg/m³)</span></h2><div class="chart" id="c-pm"></div></section>
@@ -151,6 +151,9 @@ function ago(seconds) {
 }
 
 // ---------------------------------------------------------------- rendering
+
+/* Stored Celsius -> displayed Fahrenheit. */
+const cToF = c => c * 9 / 5 + 32;
 
 /* Bucket width in seconds for the selected range. "day" is nominal -- local days
    are 23 or 25 hours twice a year, which is irrelevant to a gap threshold. */
@@ -242,8 +245,19 @@ function makeChart(el, labels, colours, data) {
   return new uPlot(opts, data, el);
 }
 
-function drawChart(key, el, labels, colours, series) {
-  const data = toData(series.segments, labels.map(l => l.metric), series.columns);
+/* `transform` converts stored units to display units -- Celsius to Fahrenheit,
+   here. It is applied per value and skips null, because those nulls are the gap
+   markers for moves and outages and converting one would draw a line across it.
+
+   Readings stay Celsius everywhere else: that is what the sensors report, what
+   the API returns and what the archive holds. Display is the only place this
+   belongs, so changing your mind later is a browser refresh rather than a
+   migration of every historical row. */
+function drawChart(key, el, labels, colours, series, transform) {
+  let data = toData(series.segments, labels.map(l => l.metric), series.columns);
+  if (transform) {
+    data = [data[0], ...data.slice(1).map(a => a.map(v => v == null ? null : transform(v)))];
+  }
   const hasAny = data.slice(1).some(a => a.some(v => v != null));
   if (!hasAny) {
     el.innerHTML = '<div class="empty">No readings in this range.</div>';
@@ -312,7 +326,7 @@ async function refreshSeries() {
   drawChart("co2", $("c-co2"), [{metric:"co2_ppm", label:"CO₂"}], ["#4ade80"], series);
   drawChart("temp", $("c-temp"),
     [{metric:"bme_temp_c", label:"BME280"}, {metric:"scd_temp_c", label:"SCD-41"}],
-    ["#4c8dff","#fbbf24"], series);
+    ["#4c8dff","#fbbf24"], series, cToF);
   drawChart("rh", $("c-rh"),
     [{metric:"bme_rh_pct", label:"BME280"}, {metric:"scd_rh_pct", label:"SCD-41"}],
     ["#4c8dff","#fbbf24"], series);
