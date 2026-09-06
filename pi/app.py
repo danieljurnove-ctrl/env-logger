@@ -17,6 +17,7 @@ import atexit
 import csv
 import hmac
 import io
+import math
 import os
 import sqlite3
 import threading
@@ -365,6 +366,31 @@ def _resolve_node(conn: sqlite3.Connection, name: str | None) -> tuple[int, str]
     if row is None:
         raise ValidationError(f"unknown node: {name}")
     return int(row["id"]), str(row["name"])
+
+
+def _describe(values: list[float]) -> dict:
+    """Summary stats over raw readings.
+
+    Median and p95 by index rather than interpolation: with a few hundred
+    readings the difference is noise, and an actual observed value is easier to
+    sanity-check against the chart than one that sits between two of them.
+    """
+    n = len(values)
+    if n == 0:
+        return {"n": 0}
+    ordered = sorted(values)
+
+    def at(q):
+        return ordered[min(n - 1, max(0, math.ceil(q * n) - 1))]
+
+    return {
+        "n": n,
+        "mean": round(sum(ordered) / n, 2),
+        "median": round(at(0.5), 2),
+        "p95": round(at(0.95), 2),
+        "min": round(ordered[0], 2),
+        "max": round(ordered[-1], 2),
+    }
 
 
 def _query_buckets(conn, node_id, metrics, t_from, t_to, bucket):
@@ -868,6 +894,170 @@ def create_app(db_path=None, token=None, flush_interval=None, start_flusher=True
             if not any(r["prev_ts"] <= s <= r["ts"] for s in explained)
         ]
         return jsonify(node=node_name, candidates=candidates)
+    # ---------------------------------------------------------- compare / fit
+
+    # Minute-precision inputs make sub-minute overlaps meaningless.
+    ROOM_OVERLAP_SECONDS = 60
+
+    def _window(args, prefix):
+        try:
+            w_from = int(args[f"{prefix}_from"])
+            w_to = int(args[f"{prefix}_to"])
+        except KeyError:
+            raise ValidationError(f"'{prefix}_from' and '{prefix}_to' are required")
+        except ValueError:
+            raise ValidationError(f"'{prefix}_*' must be integer unix timestamps")
+        if w_from >= w_to:
+            raise ValidationError(f"'{prefix}_from' must be before '{prefix}_to'")
+        return w_from, w_to
+
+    def _raw(conn, node_id, metric, w_from, w_to):
+        """Raw values, not bucket averages.
+
+        A p95 of averages is not a p95 -- bucketing is a drawing concern and
+        would flatten exactly the tail that PM questions live in.
+        """
+        # metric is whitelisted against SENSOR_RANGES by every caller before it
+        # reaches this interpolation.
+        return [
+            r[0]
+            for r in conn.execute(
+                f"SELECT {metric} FROM readings "
+                f"WHERE node_id = ? AND ts >= ? AND ts < ? AND {metric} IS NOT NULL",
+                (node_id, w_from, w_to),
+            ).fetchall()
+        ]
+
+    @app.get("/api/compare")
+    @_require_token
+    def compare():
+        """Two windows, side by side. The questions this project exists for are
+        comparisons, and a time series alone cannot answer one."""
+        conn = _get_db()
+        args = request.args
+        metrics = [m.strip() for m in args.get("metrics", "co2_ppm").split(",") if m.strip()]
+        bad = [m for m in metrics if m not in SENSOR_RANGES]
+        if bad:
+            raise ValidationError(f"unknown metric(s): {', '.join(bad)}")
+        if not metrics:
+            raise ValidationError("'metrics' must name at least one column")
+
+        if not conn.execute("SELECT 1 FROM nodes LIMIT 1").fetchone():
+            return jsonify(a={}, b={}, node=None)
+        node_id, node_name = _resolve_node(conn, args.get("node"))
+
+        out = {}
+        for side in ("a", "b"):
+            w_from, w_to = _window(args, side)
+            out[side] = {
+                "from": w_from,
+                "to": w_to,
+                "rooms": _rooms_in(conn, node_id, w_from, w_to),
+                "metrics": {
+                    m: _describe(_raw(conn, node_id, m, w_from, w_to))
+                    for m in metrics
+                },
+            }
+        return jsonify(node=node_name, **out)
+
+    def _rooms_in(conn, node_id, w_from, w_to):
+        """Which rooms a window actually covers -- a window that straddles a
+        move is comparing two rooms to itself, and the caller should be told."""
+        # A *material* overlap, not any overlap. The dashboard's datetime-local
+        # inputs have minute precision, so a window pinned to a placement
+        # boundary spills up to 59s into the neighbour -- and reporting that as
+        # "this window covers two rooms" is a false alarm about the one thing
+        # this field exists to warn about.
+        rows = conn.execute(
+            """SELECT DISTINCT COALESCE(m.name, 'Unknown') AS room
+               FROM placements p LEFT JOIN rooms m ON m.id = p.room_id
+               WHERE p.node_id = ?
+                 AND MIN(COALESCE(p.end_ts, ?), ?) - MAX(p.start_ts, ?) >= ?
+               ORDER BY room""",
+            (node_id, w_to, w_to, w_from, ROOM_OVERLAP_SECONDS),
+        ).fetchall()
+        return [r["room"] for r in rows] or ["Unknown"]
+
+    @app.get("/api/decay")
+    @_require_token
+    def decay():
+        """Fit an exponential decay and report its rate.
+
+        On CO2 after a room empties that rate is air changes per hour; on PM
+        after cooking it is how fast the room clears. Both are the quantitative
+        payoff the charts only hint at.
+        """
+        conn = _get_db()
+        args = request.args
+        metric = args.get("metric", "co2_ppm")
+        if metric not in SENSOR_RANGES:
+            raise ValidationError(f"unknown metric: {metric}")
+        if not conn.execute("SELECT 1 FROM nodes LIMIT 1").fetchone():
+            return jsonify(fitted=False, reason="no readings yet")
+        node_id, _ = _resolve_node(conn, args.get("node"))
+        w_from, w_to = _window(args, "w")
+
+        # Outdoor CO2 is the floor a room decays toward, not zero -- fitting
+        # against zero bends the curve and inflates the rate. Particulates do
+        # decay toward ~0 indoors.
+        default_baseline = 420.0 if metric == "co2_ppm" else 0.0
+        try:
+            baseline = float(args.get("baseline", default_baseline))
+        except ValueError:
+            raise ValidationError("'baseline' must be a number")
+
+        rows = conn.execute(
+            f"SELECT ts, {metric} AS v FROM readings "
+            f"WHERE node_id = ? AND ts >= ? AND ts < ? AND {metric} IS NOT NULL "
+            "ORDER BY ts",
+            (node_id, w_from, w_to),
+        ).fetchall()
+        points = [(int(r["ts"]), float(r["v"])) for r in rows if r["v"] > baseline]
+        if len(points) < 5:
+            return jsonify(
+                fitted=False, metric=metric, baseline=baseline,
+                n=len(points),
+                reason="fewer than 5 readings above the baseline in this window",
+            )
+
+        # ln(v - baseline) against elapsed seconds is a straight line whose
+        # slope is -lambda. Least squares on that, plus r^2 -- because a window
+        # that is not actually a decay still yields a number, and reporting it
+        # without saying how well it fits would be the dishonest part.
+        t0 = points[0][0]
+        xs = [t - t0 for t, _ in points]
+        ys = [math.log(v - baseline) for _, v in points]
+        n = len(xs)
+        mx, my = sum(xs) / n, sum(ys) / n
+        sxx = sum((x - mx) ** 2 for x in xs)
+        if sxx == 0:
+            return jsonify(fitted=False, metric=metric, baseline=baseline,
+                           n=n, reason="all readings share one timestamp")
+        slope = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sxx
+        intercept = my - slope * mx
+        ss_tot = sum((y - my) ** 2 for y in ys)
+        ss_res = sum((y - (intercept + slope * x)) ** 2 for x, y in zip(xs, ys))
+        r2 = 1.0 if ss_tot == 0 else 1 - ss_res / ss_tot
+
+        if slope >= 0:
+            return jsonify(
+                fitted=False, metric=metric, baseline=baseline, n=n, r2=round(r2, 4),
+                reason="this window rises rather than decays",
+            )
+
+        per_hour = -slope * 3600.0
+        return jsonify(
+            fitted=True,
+            metric=metric,
+            baseline=baseline,
+            n=n,
+            **{"from": w_from}, to=w_to,
+            rate_per_hour=round(per_hour, 3),
+            half_life_minutes=round(math.log(2) / -slope / 60.0, 1),
+            start_value=round(points[0][1], 1),
+            end_value=round(points[-1][1], 1),
+            r2=round(r2, 4),
+        )
 
     # -------------------------------------------------------------- read API
 

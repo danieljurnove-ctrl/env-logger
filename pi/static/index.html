@@ -69,6 +69,16 @@
   .hint { color:var(--dim); font-size:12px }
   .candidate { margin-top:8px; padding:8px 10px; border:1px dashed var(--line);
                border-radius:6px }
+  /* Two sides side by side on a desktop, stacked on a phone. minmax(0,1fr)
+     for the same reason the page grid uses it: an auto track would size to the
+     datetime inputs and push the panel past the viewport. */
+  .cmp-sides { display:grid; grid-template-columns:minmax(0,1fr); gap:10px; margin:10px 0 }
+  @media (min-width:720px) { .cmp-sides { grid-template-columns:minmax(0,1fr) minmax(0,1fr) } }
+  .cmp-side { border:1px solid var(--line); border-radius:6px; padding:8px }
+  .cmp-side input { min-width:0; flex:1 }
+  .fit { margin-top:10px; padding:8px 10px; border-radius:6px; background:#0d1015;
+         border:1px solid var(--line); font-size:13px }
+  .fit .caveat { color:var(--dim); font-size:12px; display:block; margin-top:4px }
   /* Arming has to be visible. The click that places a marker is the same
      gesture uPlot uses to begin a zoom drag, so without the cursor change an
      armed chart looks exactly like an idle one. */
@@ -133,6 +143,33 @@
     <h2>Marker history</h2>
     <div class="table-wrap"><table id="markers"><tbody></tbody></table></div>
     <div class="msg" id="markHistMsg"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Compare</h2>
+    <div class="row">
+      <select id="cmpMetric"></select>
+      <button id="cmpRun">Compare</button>
+      <span class="hint">Pick a placement to fill a side, then adjust the times.</span>
+    </div>
+    <div class="cmp-sides">
+      <div class="cmp-side">
+        <div class="row"><strong>A</strong> <select class="cmp-pick" data-side="a"></select></div>
+        <div class="row">
+          <input type="datetime-local" id="aFrom"><input type="datetime-local" id="aTo">
+        </div>
+      </div>
+      <div class="cmp-side">
+        <div class="row"><strong>B</strong> <select class="cmp-pick" data-side="b"></select></div>
+        <div class="row">
+          <input type="datetime-local" id="bFrom"><input type="datetime-local" id="bTo">
+        </div>
+      </div>
+    </div>
+    <div class="chart" id="c-cmp"></div>
+    <div class="table-wrap"><table id="cmpStats"><tbody></tbody></table></div>
+    <div id="cmpDecay"></div>
+    <div class="msg" id="cmpMsg"></div>
   </section>
 
   <section class="panel">
@@ -507,6 +544,7 @@ async function refreshRooms() {
 async function refreshPlacements() {
   const { placements } = await api("/placements");
   const rooms = await refreshRooms();
+  fillComparePickers(placements);
   const body = $("placements").querySelector("tbody");
   if (!placements.length) {
     body.innerHTML = '<tr><td class="empty">Nothing recorded yet. '
@@ -603,6 +641,153 @@ async function refreshCandidates() {
       <button class="secondary c-move">Record move here</button>
       <button class="secondary c-dismiss">Not a move</button>
     </div>`).join("");
+}
+
+/* ---------------------------------------------------------------- compare
+
+   The dashboard's other half. A time series shows that something changed;
+   only a comparison answers "did the hood help", which is what
+   docs/design.md#purpose says this project is for.
+
+   Stats come from /api/compare over RAW rows rather than being computed here
+   from the bucketed chart data: a p95 of bucket averages is not a p95, and the
+   tail is exactly where PM questions live. */
+
+const CMP_METRICS = [
+  ["co2_ppm", "CO₂ (ppm)"], ["bme_temp_c", "Temperature (°C)"],
+  ["bme_rh_pct", "Humidity (%)"], ["pm2_5_atm", "PM2.5 (µg/m³)"],
+  ["pm0_3_count", "≥0.3µm count"], ["pressure_hpa", "Pressure (hPa)"],
+];
+let cmpChart = null;
+
+const epochOf = (id) => {
+  const v = $(id).value;
+  return v ? Math.floor(new Date(v).getTime()/1000) : null;
+};
+
+function fillComparePickers(placements) {
+  const opts = '<option value="">— pick a placement —</option>' + placements.map(p => {
+    const end = p.end_ts || Math.floor(Date.now()/1000);
+    return `<option value="${p.start_ts},${end}">${p.room} — ${
+      new Date(p.start_ts*1000).toLocaleDateString()} ${
+      new Date(p.start_ts*1000).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}</option>`;
+  }).join("");
+  document.querySelectorAll(".cmp-pick").forEach(sel => {
+    const keep = sel.value;
+    sel.innerHTML = opts;
+    if (keep) sel.value = keep;
+  });
+}
+
+function statsTable(res, metricLabel) {
+  const cols = ["n", "mean", "median", "p95", "min", "max"];
+  const side = (k) => res[k].metrics[Object.keys(res[k].metrics)[0]] || {};
+  const a = side("a"), b = side("b");
+  if (!a.n && !b.n) return '<tr><td class="empty">No readings in either window.</td></tr>';
+  const room = (k) => res[k].rooms.join(" + ");
+  const delta = (c) =>
+    (a[c] == null || b[c] == null) ? "" :
+    (b[c] - a[c] > 0 ? "+" : "") + (b[c] - a[c]).toFixed(2);
+  return `<tr><th>${metricLabel}</th>${cols.map(c => `<th>${c}</th>`).join("")}</tr>
+    <tr><td>A — ${room("a")}</td>${cols.map(c => `<td>${a[c] ?? "–"}</td>`).join("")}</tr>
+    <tr><td>B — ${room("b")}</td>${cols.map(c => `<td>${b[c] ?? "–"}</td>`).join("")}</tr>
+    <tr><td class="hint">B − A</td>${cols.map(c =>
+        `<td class="hint">${c === "n" ? "" : delta(c)}</td>`).join("")}</tr>`;
+}
+
+/* Both windows are re-based to seconds-since-their-own-start, which is what
+   makes two different stretches of clock time overlay at all. */
+async function compareSeries(metric, aFrom, aTo, bFrom, bTo) {
+  const fetchOne = async (from, to) => {
+    const span = to - from;
+    const bucket = String(Math.max(1, Math.round(span / 240)));
+    const q = new URLSearchParams({ metrics: metric, from, to, bucket, tz: TZ });
+    const s = await api(`/api/series?${q}`);
+    const pts = [];
+    for (const seg of s.segments) for (const row of seg.rows) {
+      if (row[1] != null) pts.push([row[0] - from, row[1]]);
+    }
+    return pts;
+  };
+  const [a, b] = await Promise.all([fetchOne(aFrom, aTo), fetchOne(bFrom, bTo)]);
+  // uPlot needs one shared x, so merge the elapsed offsets from both sides.
+  const xs = [...new Set([...a.map(p => p[0]), ...b.map(p => p[0])])].sort((m, n) => m - n);
+  const lookup = (pts) => { const m = new Map(pts); return xs.map(x => m.has(x) ? m.get(x) : null); };
+  return [xs, lookup(a), lookup(b)];
+}
+
+function drawCompare(data) {
+  const el = $("c-cmp");
+  if (cmpChart) { cmpChart.destroy(); cmpChart = null; }
+  el.innerHTML = "";
+  cmpChart = new uPlot({
+    width: el.clientWidth || 800,
+    height: 220,
+    cursor: { y:false },
+    // Elapsed seconds, not wall clock: the two windows are different times.
+    scales: { x: { time:false } },
+    axes: [
+      { stroke:"#98a2b3", grid:{ stroke:"#232a36" }, ticks:{ stroke:"#232a36" },
+        values: (u, vals) => vals.map(v => duration(Math.round(v))) },
+      { stroke:"#98a2b3", grid:{ stroke:"#232a36" }, ticks:{ stroke:"#232a36" } },
+    ],
+    series: [
+      { label: "elapsed" },
+      { label: "A", stroke:"#4c8dff", width:1.6, spanGaps:false },
+      { label: "B", stroke:"#fb923c", width:1.6, spanGaps:false },
+    ],
+  }, data, el);
+}
+
+async function runDecay(metric, from, to) {
+  const el = $("cmpDecay");
+  const q = new URLSearchParams({ metric, w_from: from, w_to: to });
+  let fit;
+  try { fit = await api(`/api/decay?${q}`); } catch (err) { el.innerHTML = ""; return; }
+  if (!fit.fitted) {
+    el.innerHTML = `<div class="fit">No decay fit for window A — ${fit.reason}.</div>`;
+    return;
+  }
+  const what = metric === "co2_ppm"
+    ? `<strong>${fit.rate_per_hour} air changes per hour</strong>`
+    : `<strong>${fit.rate_per_hour}/h</strong> clearance rate`;
+  el.innerHTML = `<div class="fit">
+    Window A decays at ${what} — half-life ${fit.half_life_minutes} min,
+    ${fit.start_value} → ${fit.end_value}, r²&nbsp;${fit.r2} over ${fit.n} readings.
+    <span class="caveat">Fitted against a baseline of ${fit.baseline}. r² says the
+    curve is exponential; it does <em>not</em> say the baseline was right — the wrong
+    one understates the rate by ~20% while still scoring above 0.99. Assumes the room
+    is unoccupied and well mixed.</span></div>`;
+}
+
+async function runCompare() {
+  const metric = $("cmpMetric").value;
+  const label = (CMP_METRICS.find(m => m[0] === metric) || [,metric])[1];
+  const [aFrom, aTo, bFrom, bTo] =
+    [epochOf("aFrom"), epochOf("aTo"), epochOf("bFrom"), epochOf("bTo")];
+  if ([aFrom, aTo, bFrom, bTo].some(v => v == null)) {
+    say($("cmpMsg"), "Both windows need a start and an end.", "err"); return;
+  }
+  if (aFrom >= aTo || bFrom >= bTo) {
+    say($("cmpMsg"), "Each window must start before it ends.", "err"); return;
+  }
+  $("cmpRun").disabled = true;
+  try {
+    const q = new URLSearchParams({
+      metrics: metric, a_from:aFrom, a_to:aTo, b_from:bFrom, b_to:bTo });
+    const [res, data] = await Promise.all([
+      api(`/api/compare?${q}`),
+      compareSeries(metric, aFrom, aTo, bFrom, bTo),
+    ]);
+    $("cmpStats").querySelector("tbody").innerHTML = statsTable(res, label);
+    drawCompare(data);
+    await runDecay(metric, aFrom, aTo);
+    $("cmpMsg").className = "msg";
+  } catch (err) {
+    say($("cmpMsg"), err.message, "err");
+  } finally {
+    $("cmpRun").disabled = false;
+  }
 }
 
 async function refreshAll() {
@@ -725,6 +910,21 @@ $("markers").addEventListener("click", async (ev) => {
   }
 });
 
+$("cmpMetric").innerHTML = CMP_METRICS
+  .map(([v, l]) => `<option value="${v}">${l}</option>`).join("");
+
+document.querySelectorAll(".cmp-pick").forEach(sel => {
+  sel.addEventListener("change", () => {
+    if (!sel.value) return;
+    const [from, to] = sel.value.split(",").map(Number);
+    const side = sel.dataset.side;
+    $(`${side}From`).value = localInput(from);
+    $(`${side}To`).value = localInput(to);
+  });
+});
+
+$("cmpRun").addEventListener("click", () => { runCompare(); });
+
 $("candidates").addEventListener("click", async (ev) => {
   const btn = ev.target.closest(".c-move, .c-dismiss");
   if (!btn) return;
@@ -768,6 +968,9 @@ addEventListener("resize", () => {
       const el = chartEls[key];
       if (el) u.setSize({ width: el.clientWidth || 800, height: 200 });
     }
+    // The compare chart is not in `charts` and was left at its creation width,
+    // which is how a desktop-sized canvas ended up overflowing a phone.
+    if (cmpChart) cmpChart.setSize({ width: $("c-cmp").clientWidth || 800, height: 220 });
   }, 200);
 });
 

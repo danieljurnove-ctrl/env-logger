@@ -458,27 +458,53 @@ first row. The tests caught exactly that.
 It exists so that a question this dashboard does not answer can be answered in a
 spreadsheet, instead of every such question becoming a feature request.
 
-### Comparison view — proposed, not built
+### Comparison view
 
-The current dashboard segments a series by placement, which is the necessary half. The missing
-half is putting two stretches of time **side by side**, which is what [Purpose](#purpose)
-actually asks for — the questions are comparisons, not time series.
+The dashboard's other half. A time series shows that something *changed*; only a comparison
+answers "did the hood help", which is what [Purpose](#purpose) says the project is for.
 
-Three shapes, in increasing order of effort:
+Two windows, picked from the placement list and then adjustable. Both are re-based to
+**seconds elapsed since their own start** — that is what lets two different stretches of clock
+time overlay on one axis at all.
 
-- **Room versus room.** Pick two placements, overlay their distributions. One sensor and one
-  calibration means the difference between them is real rather than instrument spread — this is
-  the whole reason a single portable node beats several fixed ones.
-- **Before versus after, within one placement.** Pick two windows and diff them: does the range
-  hood work, did opening the door help the bedroom. Show the overlaid series *and* a summary
-  table — mean, median, p95 and max — because PM questions live in the tail while CO₂ questions
-  live in the mean.
-- **Decay fits.** For a selected window, fit an exponential decay and report the time constant.
-  On CO₂ after a room empties that is air changes per hour, a real ventilation measurement. On
-  PM2.5 after cooking it is how fast the room clears, with and without intervention.
+Stats come from `/api/compare` over **raw rows**, not from the bucketed chart data. A p95 of
+bucket averages is not a p95, and the tail is exactly where PM questions live. The response also
+reports which rooms each window covers, because a window that straddles a move is comparing a
+room to itself — with a 60-second minimum overlap, since the `datetime-local` inputs have minute
+precision and a sub-minute spill into the neighbouring placement is not a straddle.
 
-Windows should be selectable by dragging on the main chart as well as by picking a placement, so
-"compare last Tuesday's dinner to tonight's" is a couple of taps on a phone rather than a SQL
-query. Note the phone-portrait constraint above applies here too: a two-column comparison layout
-has to collapse to stacked panels, and the summary table is exactly the kind of unshrinkable
-child that breaks the `minmax(0, 1fr)` grid if added carelessly.
+### Decay fits
+
+`/api/decay` fits `ln(value − baseline)` against elapsed time by least squares. The slope is the
+decay constant: on CO₂ after a room empties that is **air changes per hour**, a real ventilation
+measurement; on PM after cooking it is how fast the room clears.
+
+**The baseline is the trap, and r² will not save you.** CO₂ decays toward the outdoor floor
+(~420 ppm), not toward zero. Fitting against zero understates the rate by about 20% — and r²
+stays above 0.99 while it does, because r² measures whether the curve is exponential, *not*
+whether the baseline you subtracted was the right one. So the default is 420 for CO₂ and 0 for
+particulates, the answer always states which baseline it used, and
+`test_a_wrong_baseline_is_wrong_but_still_fits_beautifully` pins the behaviour so nobody deletes
+the warning.
+
+The fit refuses rather than guessing: fewer than five readings above the baseline, or a window
+that rises rather than decays, returns `fitted: false` with a reason. The rate assumes the room
+is unoccupied and well mixed, which the dashboard says next to the number.
+
+What it answers, in the two shapes that matter:
+
+- **Room versus room.** One sensor and one calibration means the difference between two
+  placements is real rather than instrument spread — the whole reason a single portable node
+  beats several fixed ones.
+- **Before versus after, within one placement.** Does the range hood work; did opening the door
+  help the bedroom. The summary table reports mean, median, p95, min, max and a B − A row.
+
+The two sides sit in a `minmax(0, 1fr)` grid that collapses to stacked panels below 720px, and
+the stats table lives in a `.table-wrap` so it scrolls inside its panel rather than widening the
+page. Both are the same phone-portrait constraint as the main grid.
+
+**The compare chart is not in `charts`**, so the resize handler has to resize it explicitly —
+missing that is what left a desktop-width canvas overflowing a 390px viewport the first time.
+
+Still unbuilt: selecting a window by dragging on the main chart, so "compare last Tuesday's
+dinner to tonight's" is a couple of taps rather than four datetime fields.
