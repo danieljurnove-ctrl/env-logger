@@ -344,3 +344,53 @@ interval:
                 id(fresh_bme) = false;
                 id(fresh_scd) = false;
                 id(fresh_pm) = false;
+
+# The onboard user button, labelled SW38 on the silk. One press records a marker
+# at that instant -- the moment you open a window is when you are at the window,
+# not at your phone, and a timestamp captured then is worth more than a label
+# typed later. The label IS typed later: a button cannot name what it saw, so it
+# lands as "button" and gets renamed in the dashboard's marker history.
+binary_sensor:
+  - platform: gpio
+    id: user_button
+    name: "User button"
+    internal: true
+    pin:
+      number: GPIO38
+      # GPIO34-39 are input-only and have NO internal pull resistors, so
+      # `pullup: true` is not merely unnecessary here, it is unavailable. The
+      # Feather V2 fits an external pull-up on SW38, so the pin idles HIGH and
+      # reads LOW while pressed -- hence inverted.
+      inverted: true
+    filters:
+      # Debounce. Without it one press is several, and markers are cheap to
+      # create but tedious to delete one at a time.
+      - delayed_on: 40ms
+    # on_click rather than on_press: it fires on release after a deliberate
+    # hold, so brushing the board while carrying it does not litter the charts.
+    on_click:
+      min_length: 150ms
+      max_length: 3s
+      then:
+        - if:
+            condition:
+              wifi.connected:
+            then:
+              - http_request.post:
+                  url: http://${ingest_host}:${ingest_port}/markers
+                  request_headers:
+                    Content-Type: application/json
+                    X-Auth-Token: !secret ingest_token
+                  # No ts: the server stamps arrival, which is the same instant
+                  # for a LAN round trip and keeps the node off any clock.
+                  json: |-
+                    root["label"] = "button";
+                  on_error:
+                    then:
+                      - logger.log:
+                          level: WARN
+                          format: "marker POST failed -- press not recorded"
+            else:
+              - logger.log:
+                  level: WARN
+                  format: "button pressed with no WiFi -- press not recorded"

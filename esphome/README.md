@@ -4,7 +4,7 @@ Firmware config for the sensor node.
 
 | File | Purpose |
 | --- | --- |
-| `env-node.yaml` | The node — board, I²C/UART buses, three sensors, HTTP POST |
+| `env-node.yaml` | The node — board, I²C/UART buses, three sensors, the button, HTTP POST |
 | `i2c-scan.yaml` | Bring-up step 4: I²C scan and nothing else |
 | `minimal.yaml` | Bring-up step 0: does the toolchain compile for this board at all |
 | `secrets.yaml.example` | Template for WiFi credentials, the ingest token, the OTA password |
@@ -81,6 +81,37 @@ Two more that are only obvious in hindsight:
   scan is logged at CONFIG and sensor readings at DEBUG. Setting `INFO` suppresses both and
   leaves a node that looks dead while working perfectly — which is exactly what happened on the
   first flash here.
+
+---
+
+## The user button
+
+The onboard tactile switch (**SW38** on the silk) records a marker on the Pi when
+pressed. The moment you open a window is when you are *at the window*, not at
+your phone, and a timestamp captured then is worth more than a label typed
+twenty minutes later.
+
+The label is typed later: a button cannot name what it saw, so the press lands as
+`"button"` and gets renamed in the dashboard's marker history.
+
+Two hardware facts drive the config, and getting either wrong gives you a pin
+that never fires or fires constantly:
+
+- **GPIO34–39 are input-only and have no internal pull resistors.** `pullup: true`
+  is not merely unnecessary on GPIO38, it is unavailable. The Feather V2 fits an
+  external pull-up on SW38, so the pin idles HIGH and reads LOW while pressed —
+  hence `inverted: true`.
+- **`on_click`, not `on_press`.** It fires on release after a deliberate hold
+  (150 ms–3 s), so brushing the board while carrying it between rooms does not
+  litter the charts. A 40 ms `delayed_on` filter debounces on top of that.
+
+**There is no local confirmation that a press registered.** The marker appears on
+the dashboard within a minute, and the log says so over `esphome logs`, but the
+node itself gives no feedback — it has no display. The onboard NeoPixel is the
+obvious fix and is not yet wired up; until it is, a press is an act of faith.
+
+A press with WiFi down is logged and lost, the same trade the readings make:
+there is no queue and no batch endpoint to replay one into.
 
 ---
 
