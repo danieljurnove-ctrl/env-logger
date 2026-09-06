@@ -351,6 +351,24 @@ the archive holds it; the dashboard converts when it draws. Keeping the conversi
 edge means changing your mind is a refresh rather than a migration of every historical row — and
 the same argument as the BME280 offset: don't bake a presentation decision into stored data.
 
+**Dew point** is derived on read too, for the same reason, and needs no column: it is a pure
+function of temperature and RH, both already stored. Computed from BME280 temperature and
+humidity via the Magnus approximation (valid roughly −45 to 60 °C):
+
+```
+γ  = ln(RH/100) + (17.62 · T) / (243.12 + T)
+Td = (243.12 · γ) / (17.62 − γ)
+```
+
+Deriving it in Python rather than SQL is not optional here: `ln()` is a SQLite math function,
+those arrived in **3.35**, and the deployed box has **3.27.2**. Apply the BME280 offset first,
+then compute — otherwise a retuned offset silently stops matching the dew point beside it.
+
+Worth surfacing because dew point answers the humidity question RH can't. RH is relative to
+temperature, so 60% in a warm room and 60% in a cold one mean very different things; dew point is
+absolute. If a window or wall surface sits below it you get condensation, and sustained
+condensation is what grows mould.
+
 **Timezones.** Store UTC. The API takes an explicit IANA timezone and does local-day grouping at
 query time. "Overnight CO₂" and "this week versus last" are local-time questions, and two days a
 year the local day is 23 or 25 hours long.
@@ -380,3 +398,28 @@ themselves from their container, then grow to match and overflow visibly.
 Vendor [uPlot](https://github.com/leeoniya/uPlot) (~40 KB, built for exactly this shape of data)
 rather than hand-rolling canvas or pulling a CDN dependency onto a box that may have no route to
 the internet.
+
+### Comparison view — proposed, not built
+
+The current dashboard segments a series by placement, which is the necessary half. The missing
+half is putting two stretches of time **side by side**, which is what [Purpose](#purpose)
+actually asks for — the questions are comparisons, not time series.
+
+Three shapes, in increasing order of effort:
+
+- **Room versus room.** Pick two placements, overlay their distributions. One sensor and one
+  calibration means the difference between them is real rather than instrument spread — this is
+  the whole reason a single portable node beats several fixed ones.
+- **Before versus after, within one placement.** Pick two windows and diff them: does the range
+  hood work, did opening the door help the bedroom. Show the overlaid series *and* a summary
+  table — mean, median, p95 and max — because PM questions live in the tail while CO₂ questions
+  live in the mean.
+- **Decay fits.** For a selected window, fit an exponential decay and report the time constant.
+  On CO₂ after a room empties that is air changes per hour, a real ventilation measurement. On
+  PM2.5 after cooking it is how fast the room clears, with and without intervention.
+
+Windows should be selectable by dragging on the main chart as well as by picking a placement, so
+"compare last Tuesday's dinner to tonight's" is a couple of taps on a phone rather than a SQL
+query. Note the phone-portrait constraint above applies here too: a two-column comparison layout
+has to collapse to stacked panels, and the summary table is exactly the kind of unshrinkable
+child that breaks the `minmax(0, 1fr)` grid if added carelessly.
