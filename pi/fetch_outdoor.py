@@ -115,10 +115,11 @@ def _hourly_series(payload: dict, wanted: dict, url: str) -> dict[int, dict]:
     """Turn {hourly: {time: [...], var: [...]}} into {ts: {column: value}}.
 
     A variable the upstream did not return becomes None rather than an
-    exception. That matters because these names cannot be verified from the
-    build sandbox -- egress to open-meteo.com is blocked there -- so a name
-    that is wrong should show up as a column that stays empty, which is
-    visible and harmless, not as an hourly job that dies.
+    exception, so a name that goes wrong shows up as a column that stays
+    empty -- visible, harmless, fixable -- and never as an hourly job that
+    dies. All six names were confirmed against the live API on 2026-09-06
+    (72 hours, every column populated), but they are upstream's to rename and
+    this file cannot be recompiled when they do.
     """
     hourly = payload.get("hourly")
     if not isinstance(hourly, dict):

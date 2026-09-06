@@ -4,14 +4,16 @@ Run from the repo root::
 
     python -m pytest pi -q
 
-These matter more than usual. Egress to open-meteo.com is blocked from the
-environment this was written in, so the upstream contract could not be checked
-against the live service -- every test here runs against a local server
-returning the documented shape. That verifies the parsing, the hour filtering
-and the upsert; it does NOT verify that the variable names are the ones
-Open-Meteo actually serves. `fetch_outdoor.py --dry-run` on the Pi is what
-closes that gap, and `test_a_variable_the_upstream_omits_becomes_null` pins the
-behaviour if one of them is wrong.
+Every test here runs against a local server returning Open-Meteo's documented
+shape, because egress to open-meteo.com is blocked from the environment this
+was written in. That covers the parsing, the hour filtering and the upsert --
+but a stand-in cannot tell you the variable names are the ones the real service
+serves. That was checked separately, by running `fetch_outdoor.py --dry-run` on
+the Pi on 2026-09-06: 72 hours, all six columns populated.
+
+`test_a_variable_the_upstream_omits_becomes_null` stays, and matters more now
+than it did then: the names are upstream's to change, and when one does the
+failure has to be a blank line on a chart rather than an hourly job that dies.
 """
 
 from __future__ import annotations
@@ -305,8 +307,8 @@ def test_nonsense_coordinates_are_rejected(monkeypatch, db):
 
 
 def test_dry_run_writes_nothing(upstream, monkeypatch, capsys, db):
-    """The command the Pi runs to check the upstream contract by hand, which is
-    the only place that check can happen."""
+    """The command that checked the upstream contract on the Pi, and the one to
+    re-run if a column ever goes empty."""
     monkeypatch.setenv("ENVLOG_LAT", "40.71")
     monkeypatch.setenv("ENVLOG_LON", "-74.01")
     assert fetch_outdoor.main(["--dry-run", "--db", db]) == 0

@@ -560,12 +560,21 @@ interpolating between two of them would draw readings nobody modelled. Holding i
 be worse — a dead fetcher would look like flat calm weather — so the line stops two hours after
 the last point it has, and the header calls out a newest hour older than three.
 
-**A verification gap, stated rather than hidden.** The environment this was written in has no
-route to `open-meteo.com`, so the variable names are the documented ones but were never seen in a
-live response. `_hourly_series` therefore treats a name the upstream does not return as an empty
-column rather than an error: a wrong name shows up as a blank line on a chart, not as an hourly
-unit going red every hour forever. `fetch_outdoor.py --dry-run` on the Pi is what closes the gap,
-and `pi/README.md` says to run it once before trusting the timer.
+**The upstream contract was verified separately, on the Pi.** It could not be checked where this
+was built — no route to `open-meteo.com` from there — so the tests run against a local stand-in
+serving the documented shape, which covers the parsing, the hour filtering and the upsert but
+cannot confirm the variable names. `fetch_outdoor.py --dry-run` closed that on 2026-09-06: 72
+hours, all six columns populated, temperature peaking at 20:00 UTC and bottoming at 13:00 —
+1 p.m. and 6 a.m. local, which is what confirms the naive-UTC timestamp reading rather than
+merely assuming it.
+
+`_hourly_series` still treats a name the upstream does not return as an empty column rather than
+an error, and that matters more now than it did before the check: the names belong to Open-Meteo,
+not to this repo, and when one changes the failure has to be a blank line on a chart rather than
+an hourly unit going red every hour forever.
+
+**`us_aqi` does not track the PM columns.** US AQI is the maximum across pollutants, so an AQI in
+the 40s against a PM2.5 of 4 µg/m³ is ozone. Worth knowing before reading it as a bug.
 
 ### Status LED
 
