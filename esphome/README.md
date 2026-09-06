@@ -4,7 +4,7 @@ Firmware config for the sensor node.
 
 | File | Purpose |
 | --- | --- |
-| `env-node.yaml` | The node — board, I²C/UART buses, three sensors, HTTP POST |
+| `env-node.yaml` | The node — board, I²C/UART buses, three sensors, the button, HTTP POST |
 | `i2c-scan.yaml` | Bring-up step 4: I²C scan and nothing else |
 | `minimal.yaml` | Bring-up step 0: does the toolchain compile for this board at all |
 | `secrets.yaml.example` | Template for WiFi credentials, the ingest token, the OTA password |
@@ -84,6 +84,37 @@ Two more that are only obvious in hindsight:
 
 ---
 
+## The user button
+
+The onboard tactile switch (**SW38** on the silk) records a marker on the Pi when
+pressed. The moment you open a window is when you are *at the window*, not at
+your phone, and a timestamp captured then is worth more than a label typed
+twenty minutes later.
+
+The label is typed later: a button cannot name what it saw, so the press lands as
+`"button"` and gets renamed in the dashboard's marker history.
+
+Two hardware facts drive the config, and getting either wrong gives you a pin
+that never fires or fires constantly:
+
+- **GPIO34–39 are input-only and have no internal pull resistors.** `pullup: true`
+  is not merely unnecessary on GPIO38, it is unavailable. The Feather V2 fits an
+  external pull-up on SW38, so the pin idles HIGH and reads LOW while pressed —
+  hence `inverted: true`.
+- **`on_click`, not `on_press`.** It fires on release after a deliberate hold
+  (150 ms–3 s), so brushing the board while carrying it between rooms does not
+  litter the charts. A 40 ms `delayed_on` filter debounces on top of that.
+
+**There is no local confirmation that a press registered.** The marker appears on
+the dashboard within a minute, and the log says so over `esphome logs`, but the
+node itself gives no feedback — it has no display. The onboard NeoPixel is the
+obvious fix and is not yet wired up; until it is, a press is an act of faith.
+
+A press with WiFi down is logged and lost, the same trade the readings make:
+there is no queue and no batch endpoint to replay one into.
+
+---
+
 ## Freshness, and why `has_state()` is not enough
 
 The [contract](../docs/design.md#node--server-contract) is that each POST carries only sensors
@@ -108,9 +139,14 @@ The POST is skipped entirely when nothing is fresh and when WiFi is down.
 every component, pin, key and option in them is schema-valid, and that is how the GPIO7/8
 flash-pin rejection above was found rather than discovered on arrival day.
 
-**A full `esphome compile` of `env-node.yaml` passes** — run on the Windows laptop 2026-09-04.
-That is what type-checks the C++ in the POST lambda, so the freshness globals, the `std::isnan`
-guards and the JSON building are known to compile, not merely known to be schema-valid.
+**A full `esphome compile` of `env-node.yaml` passes** — run on the Windows laptop, first on
+2026-09-04 and again on 2026-09-06 with the button block above. That is what type-checks the C++
+in both lambdas, so the freshness globals, the `std::isnan` guards, the JSON building and the
+button's marker POST are known to compile, not merely known to be schema-valid.
+
+The compile has to happen on the laptop and not in an agent session: fetching the ESP-IDF
+toolchain needs egress that a sandboxed session does not have, so *schema-valid* is the most any
+change to this file can claim until someone runs the command below.
 
 Re-run it after editing the lambda; the toolchain stays warm, so it is a couple of minutes rather
 than twenty:
