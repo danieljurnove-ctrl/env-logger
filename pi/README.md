@@ -110,6 +110,8 @@ Every one of them requires `X-Auth-Token`. A tailnet is a flat network.
 | `GET` | `/api/series` | Chart data, segmented by placement |
 | `GET` | `/api/candidate-moves` | Reboots with a gap that no placement explains |
 | `GET` | `/api/export` | Raw rows as CSV, room resolved per reading |
+| `GET` | `/api/compare` | Two windows summarised side by side, from raw rows |
+| `GET` | `/api/decay` | Exponential fit over one window: rate, half-life, r² |
 | `GET` | `/rooms` | The room preset list |
 | `GET` | `/` | The dashboard |
 | `POST` | `/login` | Exchanges the token for a cookie |

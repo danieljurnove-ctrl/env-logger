@@ -65,6 +65,8 @@ def rows(app):
         ("delete", "/markers/1"),
         ("get", "/api/candidate-moves"),
         ("get", "/api/export"),
+        ("get", "/api/compare"),
+        ("get", "/api/decay"),
     ],
 )
 def test_every_endpoint_requires_the_token(client, method, path):
@@ -632,3 +634,150 @@ def test_export_on_a_fresh_install_is_empty_not_an_error(client):
     res = client.get("/api/export", headers=AUTH)
     assert res.status_code == 200
     assert res.get_data(as_text=True) == ""
+
+
+# ------------------------------------------------------------------- compare
+
+
+def _values(app, column, points):
+    """Write (ts, value) rows for one column directly."""
+    conn = connect(app.config["ENVLOG_DB"])
+    try:
+        conn.execute("INSERT OR IGNORE INTO nodes (id, name) VALUES (1, 'feather-01')")
+        for ts, v in points:
+            conn.execute(
+                f"INSERT INTO readings (node_id, ts, {column}) VALUES (1, ?, ?)",
+                (ts, v),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_compare_summarises_each_window_from_raw_rows(app, client):
+    _values(app, "co2_ppm", [(1000 + i, float(v))
+                             for i, v in enumerate([400, 500, 600, 700, 5000])])
+    _values(app, "co2_ppm", [(2000 + i, 800.0) for i in range(4)])
+    res = client.get(
+        "/api/compare?a_from=900&a_to=1100&b_from=1900&b_to=2100", headers=AUTH
+    ).get_json()
+    a = res["a"]["metrics"]["co2_ppm"]
+    assert a["n"] == 5
+    assert a["min"] == 400 and a["max"] == 5000
+    assert a["median"] == 600
+    # p95 of five readings is the largest -- an observed value, not an
+    # interpolation between two of them.
+    assert a["p95"] == 5000
+    assert res["b"]["metrics"]["co2_ppm"] == {
+        "n": 4, "mean": 800.0, "median": 800.0, "p95": 800.0,
+        "min": 800.0, "max": 800.0,
+    }
+
+
+def test_compare_reports_the_rooms_each_window_covers(app, client):
+    _values(app, "co2_ppm", [(1000, 500.0), (3000, 500.0)])
+    client.post("/placements", json={"node": "feather-01", "room": "office",
+                                     "start_ts": 900}, headers=AUTH)
+    client.post("/placements", json={"node": "feather-01", "room": "bedroom",
+                                     "start_ts": 2000}, headers=AUTH)
+    res = client.get(
+        "/api/compare?a_from=900&a_to=1500&b_from=2500&b_to=3500", headers=AUTH
+    ).get_json()
+    assert res["a"]["rooms"] == ["office"]
+    assert res["b"]["rooms"] == ["bedroom"]
+
+
+def test_compare_flags_a_window_that_straddles_a_move(app, client):
+    """Comparing a window that spans two rooms is comparing a room to itself."""
+    _values(app, "co2_ppm", [(1000, 500.0), (3000, 500.0)])
+    client.post("/placements", json={"node": "feather-01", "room": "office",
+                                     "start_ts": 900}, headers=AUTH)
+    client.post("/placements", json={"node": "feather-01", "room": "bedroom",
+                                     "start_ts": 2000}, headers=AUTH)
+    res = client.get(
+        "/api/compare?a_from=900&a_to=3500&b_from=2500&b_to=3500", headers=AUTH
+    ).get_json()
+    assert res["a"]["rooms"] == ["bedroom", "office"]
+
+
+def test_compare_validation(app, client):
+    _values(app, "co2_ppm", [(1000, 500.0)])
+    for qs in (
+        "a_from=1&a_to=2",                       # b missing entirely
+        "a_from=2&a_to=1&b_from=1&b_to=2",       # a inverted
+        "a_from=1&a_to=2&b_from=1&b_to=2&metrics=nope",
+    ):
+        assert client.get(f"/api/compare?{qs}", headers=AUTH).status_code == 400
+
+
+# --------------------------------------------------------------------- decay
+
+
+def _exponential(start_ts, count, step, baseline, amplitude, per_hour):
+    import math as _m
+    return [
+        (start_ts + i * step,
+         baseline + amplitude * _m.exp(-per_hour / 3600.0 * i * step))
+        for i in range(count)
+    ]
+
+
+def test_decay_recovers_a_known_rate(app, client):
+    """The whole point: a CO2 curve becomes air changes per hour."""
+    _values(app, "co2_ppm",
+            _exponential(10_000, 60, 60, 420.0, 600.0, per_hour=0.5))
+    res = client.get(
+        "/api/decay?metric=co2_ppm&w_from=9000&w_to=20000", headers=AUTH
+    ).get_json()
+    assert res["fitted"] is True
+    assert abs(res["rate_per_hour"] - 0.5) < 0.01
+    assert res["r2"] > 0.999
+    assert res["baseline"] == 420.0          # outdoor floor, not zero
+    assert abs(res["half_life_minutes"] - 83.2) < 1.0
+
+
+def test_a_wrong_baseline_is_wrong_but_still_fits_beautifully(app, client):
+    """The trap this endpoint sets, pinned so nobody removes the warning.
+
+    Fitting CO2 against zero instead of the outdoor floor understates the rate
+    by about 20% -- and r^2 stays above 0.999 while it does. r^2 measures
+    whether the curve is exponential, NOT whether the baseline you subtracted
+    was the right one, so it cannot catch this. The number looks confident and
+    is wrong, which is why the default baseline is 420 rather than 0 and why
+    the dashboard states the baseline next to the answer.
+    """
+    _values(app, "co2_ppm",
+            _exponential(10_000, 60, 60, 420.0, 600.0, per_hour=0.5))
+    right = client.get(
+        "/api/decay?metric=co2_ppm&w_from=9000&w_to=20000", headers=AUTH
+    ).get_json()
+    wrong = client.get(
+        "/api/decay?metric=co2_ppm&w_from=9000&w_to=20000&baseline=0", headers=AUTH
+    ).get_json()
+    assert abs(right["rate_per_hour"] - 0.5) < 0.01
+    assert wrong["rate_per_hour"] < 0.42          # materially understated
+    assert wrong["r2"] > 0.99                     # and r^2 does not notice
+
+
+def test_decay_refuses_a_rising_window(app, client):
+    _values(app, "co2_ppm", [(1000 + i * 60, 500.0 + i * 10) for i in range(20)])
+    res = client.get(
+        "/api/decay?metric=co2_ppm&w_from=900&w_to=3000", headers=AUTH
+    ).get_json()
+    assert res["fitted"] is False
+    assert "rises" in res["reason"]
+
+
+def test_decay_refuses_too_few_points(app, client):
+    _values(app, "co2_ppm", [(1000, 900.0), (1060, 800.0)])
+    res = client.get(
+        "/api/decay?metric=co2_ppm&w_from=900&w_to=2000", headers=AUTH
+    ).get_json()
+    assert res["fitted"] is False
+    assert res["n"] == 2
+
+
+def test_decay_rejects_an_unknown_metric(app, client):
+    assert client.get(
+        "/api/decay?metric=nope&w_from=1&w_to=2", headers=AUTH
+    ).status_code == 400
