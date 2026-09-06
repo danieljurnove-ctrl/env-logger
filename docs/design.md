@@ -399,6 +399,36 @@ Vendor [uPlot](https://github.com/leeoniya/uPlot) (~40 KB, built for exactly thi
 rather than hand-rolling canvas or pulling a CDN dependency onto a box that may have no route to
 the internet.
 
+### Markers
+
+Placements record *where* the node was. Markers record *what you did*: "opened windows", "left
+house", "cooked with fan on". Without them the charts show that something changed and never why,
+and [Purpose](#purpose) is entirely about before-and-after — a CO₂ decay curve is a ventilation
+measurement only once a window is known to have opened.
+
+**Points, not intervals.** An event with a duration is two markers. This keeps the schema to three
+columns and the interaction to a single click; `ALTER TABLE ... ADD COLUMN` is O(1) metadata-only
+in SQLite if that ever needs revisiting.
+
+**Not scoped to a node.** Every marker draws on every chart, which is what "left house" wants, and
+which room the node was in at that instant is already answered by placements.
+
+**Arming is deliberate.** uPlot already binds drag-on-a-chart to zoom, and both a zoom and a click
+end in a `click` event — so placing a marker has to be an explicit mode, and a gesture that moved
+more than three pixels between mousedown and mouseup is treated as a zoom and places nothing.
+Without that guard every zoom would drop a marker where the drag ended.
+
+**Rendering reuses the move-boundary plugin pattern**, and is registered in `makeChart` rather
+than per chart, which is the whole of "one marker shows on all six". Solid magenta where a move is
+dashed grey, and labelled where a move is not — a move is already named by its band in the
+timeline, whereas an annotation has nowhere else to say what it was. The draw hook is handed every
+marker and drops what falls outside the plot, so no range filtering is needed anywhere.
+
+**Labels autocomplete from the full history** rather than a preset table like `rooms`. Markers are
+too varied to enumerate up front, but repeat often enough that typing "opened windows" twice
+should not produce two spellings. `GET /markers` is unbounded for the same reason — these are
+hand-typed events, a few a day at most, so the whole history is a small payload.
+
 ### Comparison view — proposed, not built
 
 The current dashboard segments a series by placement, which is the necessary half. The missing

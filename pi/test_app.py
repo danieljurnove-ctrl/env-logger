@@ -59,6 +59,10 @@ def rows(app):
         ("post", "/ingest"),
         ("post", "/placements"),
         ("patch", "/placements/1"),
+        ("get", "/markers"),
+        ("post", "/markers"),
+        ("patch", "/markers/1"),
+        ("delete", "/markers/1"),
     ],
 )
 def test_every_endpoint_requires_the_token(client, method, path):
@@ -445,3 +449,94 @@ def test_rooms_lists_the_preset_names(client):
     client.post("/placements", headers=AUTH, json={"node": "feather-01", "room": "study"})
     body = client.get("/rooms", headers=AUTH).get_json()
     assert [r["name"] for r in body["rooms"]] == ["study"]
+
+
+# -------------------------------------------------------------------- markers
+
+
+def _mark(client, label, ts=None):
+    body = {"label": label}
+    if ts is not None:
+        body["ts"] = ts
+    res = client.post("/markers", json=body, headers=AUTH)
+    assert res.status_code == 201, res.get_json()
+    return res.get_json()
+
+
+def test_marker_round_trips(client):
+    created = _mark(client, "opened windows", ts=1_700_000_000)
+    assert created["ts"] == 1_700_000_000
+    assert created["label"] == "opened windows"
+    listed = client.get("/markers", headers=AUTH).get_json()["markers"]
+    assert listed == [created]
+
+
+def test_markers_come_back_newest_first(client):
+    _mark(client, "left house", ts=1_700_000_000)
+    _mark(client, "came back", ts=1_700_003_600)
+    labels = [m["label"] for m in client.get("/markers", headers=AUTH).get_json()["markers"]]
+    assert labels == ["came back", "left house"]
+
+
+def test_ts_defaults_to_now(client):
+    before = int(time.time())
+    created = _mark(client, "cooked with fan on")
+    assert before <= created["ts"] <= int(time.time())
+
+
+def test_label_is_trimmed_and_required(client):
+    assert _mark(client, "  opened windows  ")["label"] == "opened windows"
+    for bad in ({"label": "   "}, {"label": ""}, {"label": 7}, {"ts": 1}):
+        assert client.post("/markers", json=bad, headers=AUTH).status_code == 400
+
+
+def test_marker_rejects_unknown_field(client):
+    res = client.post(
+        "/markers", json={"label": "x", "room": "kitchen"}, headers=AUTH
+    )
+    assert res.status_code == 400
+    assert "room" in res.get_json()["error"]
+
+
+def test_marker_rejects_boolean_ts(client):
+    """bool is an int in Python; a marker at 'True' would be epoch 1970."""
+    assert client.post(
+        "/markers", json={"label": "x", "ts": True}, headers=AUTH
+    ).status_code == 400
+
+
+def test_marker_is_editable(client):
+    created = _mark(client, "opend windows", ts=1_700_000_000)
+    res = client.patch(
+        f"/markers/{created['id']}",
+        json={"label": "opened windows", "ts": 1_700_000_060},
+        headers=AUTH,
+    )
+    assert res.status_code == 200
+    assert res.get_json() == {
+        "id": created["id"], "ts": 1_700_000_060, "label": "opened windows",
+    }
+
+
+def test_patch_one_field_leaves_the_other(client):
+    created = _mark(client, "left house", ts=1_700_000_000)
+    res = client.patch(f"/markers/{created['id']}", json={"ts": 1}, headers=AUTH)
+    assert res.get_json() == {"id": created["id"], "ts": 1, "label": "left house"}
+
+
+def test_empty_patch_is_rejected(client):
+    created = _mark(client, "left house")
+    assert client.patch(
+        f"/markers/{created['id']}", json={}, headers=AUTH
+    ).status_code == 400
+
+
+def test_marker_is_deletable(client):
+    created = _mark(client, "misclick", ts=1_700_000_000)
+    assert client.delete(f"/markers/{created['id']}", headers=AUTH).status_code == 204
+    assert client.get("/markers", headers=AUTH).get_json()["markers"] == []
+
+
+def test_unknown_marker_is_404(client):
+    assert client.patch("/markers/999", json={"label": "x"}, headers=AUTH).status_code == 404
+    assert client.delete("/markers/999", headers=AUTH).status_code == 404

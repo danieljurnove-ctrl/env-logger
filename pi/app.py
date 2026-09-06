@@ -641,6 +641,93 @@ def create_app(db_path=None, token=None, flush_interval=None, start_flusher=True
             ).fetchone()
         return jsonify(dict(updated))
 
+    # --------------------------------------------------------------- markers
+
+    def _marker(conn: sqlite3.Connection, marker_id: int):
+        return conn.execute(
+            "SELECT id, ts, label FROM markers WHERE id = ?", (marker_id,)
+        ).fetchone()
+
+    def _marker_fields(payload: object) -> dict:
+        """Shared by POST and PATCH so the two cannot drift apart on what a
+        valid marker is."""
+        if not isinstance(payload, dict):
+            raise ValidationError("body must be a JSON object")
+        unknown = sorted(set(payload) - {"ts", "label"})
+        if unknown:
+            raise ValidationError(f"unknown field(s): {', '.join(unknown)}")
+        fields = {}
+        if "label" in payload:
+            label = payload["label"]
+            if not isinstance(label, str) or not label.strip():
+                raise ValidationError("'label' must be a non-empty string")
+            fields["label"] = label.strip()
+        if "ts" in payload:
+            ts = payload["ts"]
+            if isinstance(ts, bool) or not isinstance(ts, int):
+                raise ValidationError("'ts' must be an integer unix timestamp")
+            fields["ts"] = ts
+        return fields
+
+    @app.get("/markers")
+    @_require_token
+    def list_markers():
+        # Unbounded, like /placements. These are hand-typed events -- a few a day
+        # at most -- so the whole history is a small payload, and having it all
+        # client-side is what lets the label autocomplete cover more than the
+        # window currently on screen.
+        conn = _get_db()
+        rows = conn.execute(
+            "SELECT id, ts, label FROM markers ORDER BY ts DESC"
+        ).fetchall()
+        return jsonify(markers=[dict(r) for r in rows])
+
+    @app.post("/markers")
+    @_require_token
+    def create_marker():
+        fields = _marker_fields(request.get_json(silent=True))
+        if "label" not in fields:
+            raise ValidationError("'label' is required")
+        ts = fields.get("ts", int(time.time()))
+        conn = _get_db()
+        with conn:
+            cur = conn.execute(
+                "INSERT INTO markers (ts, label) VALUES (?, ?)",
+                (ts, fields["label"]),
+            )
+            marker_id = int(cur.lastrowid)
+        return jsonify(id=marker_id, ts=ts, label=fields["label"]), 201
+
+    @app.patch("/markers/<int:marker_id>")
+    @_require_token
+    def update_marker(marker_id: int):
+        fields = _marker_fields(request.get_json(silent=True))
+        if not fields:
+            raise ValidationError("nothing to update")
+        conn = _get_db()
+        if _marker(conn, marker_id) is None:
+            return jsonify(error="no such marker"), 404
+        sets = ", ".join(f"{name} = ?" for name in fields)
+        with conn:
+            conn.execute(
+                f"UPDATE markers SET {sets} WHERE id = ?",
+                [*fields.values(), marker_id],
+            )
+            updated = _marker(conn, marker_id)
+        return jsonify(dict(updated))
+
+    @app.delete("/markers/<int:marker_id>")
+    @_require_token
+    def delete_marker(marker_id: int):
+        """Placing a marker is one click on a chart, so misplacing one is too.
+        Removal has to be as cheap as creation or the charts fill with noise."""
+        conn = _get_db()
+        if _marker(conn, marker_id) is None:
+            return jsonify(error="no such marker"), 404
+        with conn:
+            conn.execute("DELETE FROM markers WHERE id = ?", (marker_id,))
+        return "", 204
+
     # -------------------------------------------------------------- read API
 
     @app.get("/api/status")

@@ -78,3 +78,22 @@ CREATE TABLE IF NOT EXISTS readings (
   boot_count   INTEGER,
   PRIMARY KEY (node_id, ts)
 );
+
+-- Arbitrary annotations: "opened windows", "left house", "cooked with fan on".
+-- The charts exist to answer before-and-after questions, and without these
+-- nothing records what the before and the after actually were. A CO2 decay
+-- curve is a ventilation measurement only once you know a window opened.
+--
+-- Points, not intervals. An event with a duration is two markers, which keeps
+-- both the schema and the click-to-place interaction trivial; ALTER TABLE ADD
+-- COLUMN is O(1) metadata-only in SQLite if that ever needs revisiting.
+--
+-- Deliberately not scoped to a node. Every marker shows on every chart, which
+-- is what "left house" wants, and which room the node was in at that instant is
+-- already answered by placements.
+CREATE TABLE IF NOT EXISTS markers (
+  id    INTEGER PRIMARY KEY,
+  ts    INTEGER NOT NULL,
+  label TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_markers_ts ON markers(ts);

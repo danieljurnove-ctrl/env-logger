@@ -102,6 +102,10 @@ Every one of them requires `X-Auth-Token`. A tailnet is a flat network.
 | `GET` | `/placements` | All placements, newest first |
 | `POST` | `/placements` | Records a move; closes the open placement first |
 | `PATCH` | `/placements/:id` | Retroactive correction |
+| `GET` | `/markers` | Every annotation, newest first |
+| `POST` | `/markers` | `{label, ts?}` — `ts` defaults to now |
+| `PATCH` | `/markers/:id` | Correct the time or the wording |
+| `DELETE` | `/markers/:id` | Returns `204` |
 | `GET` | `/api/status` | Liveness: last reading, seconds since, current room |
 | `GET` | `/api/series` | Chart data, segmented by placement |
 | `GET` | `/rooms` | The room preset list |
@@ -128,6 +132,13 @@ the token back out of the URL.
 It shows liveness in the header, a room timeline with the settling period hatched, five charts,
 a move control, and an editable placement history. Moves appear as dashed vertical rules on every
 chart and break the line, so a trend is never drawn across two different rooms.
+
+**Markers** annotate what you did. Type a label, press *Place on a chart…*, then click any chart
+at the moment it happened; the marker draws as a solid magenta rule on all six charts, labelled.
+Arming is deliberate rather than a bare click, because uPlot already uses drag-on-a-chart to zoom
+— a drag of more than a few pixels is treated as a zoom and places nothing. Escape cancels. The
+label field autocompletes from every marker you have ever made, so "opened windows" does not
+acquire a second spelling. Misplaced ones are editable and deletable in the history table below.
 
 uPlot is vendored in `static/vendor/` rather than loaded from a CDN — the Pi may have no route to
 the internet, and the dashboard has to work when it doesn't.
