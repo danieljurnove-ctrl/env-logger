@@ -30,6 +30,8 @@ correct room attribution matters more than either. See
      │     ├─ POST  /ingest          auth → validate → buffer → batched write
      │     ├─ POST  /placements      "I moved it to the bedroom"
      │     ├─ PATCH /placements/:id  retroactive correction
+     │     ├─ GET   /markers         annotations: "opened windows"
+     │     ├─ POST  /markers         placed by clicking a chart
      │     ├─ GET   /api/series      JSON for the dashboard
      │     └─ GET   /                self-contained HTML dashboard
      ├─ SQLite  /var/lib/envlog/envlog.db   (WAL, batched ~1 write/min)
@@ -106,6 +108,12 @@ node**. The node identifies the device (`feather-01`); a `placements` table reco
 it was in and when. Moving it is two writes and no firmware change, and mislabelled history is
 corrected by editing one row rather than rewriting thousands. See
 [docs/design.md](docs/design.md#location-tracking).
+
+**Markers** record what you did. Click any chart at the moment something
+happened — "opened windows", "left house", "cooked with fan on" — and the
+annotation appears on all six charts at once. A CO₂ decay curve is only a
+ventilation measurement once you know a window opened, and a PM spike is only a
+cooking test once you know the hood was on.
 
 ---
 

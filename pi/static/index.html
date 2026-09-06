@@ -66,6 +66,11 @@
   .chart { width:100% }
   .empty { color:var(--dim); padding:20px 0; text-align:center }
   .u-legend { font-size:12px }
+  .hint { color:var(--dim); font-size:12px }
+  /* Arming has to be visible. The click that places a marker is the same
+     gesture uPlot uses to begin a zoom drag, so without the cursor change an
+     armed chart looks exactly like an idle one. */
+  body.arming .chart, body.arming .chart canvas { cursor:crosshair }
 </style>
 
 <header>
@@ -89,6 +94,18 @@
     <div class="msg" id="moveMsg"></div>
   </section>
 
+  <section class="panel">
+    <h2>Markers</h2>
+    <div class="row">
+      <input id="markerLabel" list="markerLabels" size="26"
+             placeholder="e.g. opened windows">
+      <datalist id="markerLabels"></datalist>
+      <button id="markBtn" aria-pressed="false">Place on a chart…</button>
+      <span class="hint" id="markHint">Label it, then click any chart at the moment it happened.</span>
+    </div>
+    <div class="msg" id="markMsg"></div>
+  </section>
+
   <section class="panel"><h2>CO₂ <span class="unit">(ppm)</span></h2><div class="chart" id="c-co2"></div></section>
   <section class="panel"><h2>Temperature <span class="unit">(°F)</span></h2><div class="chart" id="c-temp"></div></section>
   <section class="panel"><h2>Relative humidity <span class="unit">(%)</span></h2><div class="chart" id="c-rh"></div></section>
@@ -104,6 +121,12 @@
     <h2>Placement history</h2>
     <div class="table-wrap"><table id="placements"><tbody></tbody></table></div>
     <div class="msg" id="histMsg"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Marker history</h2>
+    <div class="table-wrap"><table id="markers"><tbody></tbody></table></div>
+    <div class="msg" id="markHistMsg"></div>
   </section>
 </main>
 
@@ -132,6 +155,8 @@ let range = RANGES[1];
 const SETTLING_SECONDS = 600;  // BME280 thermalising, PM fan spinning up
 const STALE_AFTER = 180;       // ~4 missed 45s samples
 const BAND_COLOURS = ["#4c8dff","#4ade80","#fbbf24","#f472b6","#22d3ee","#a78bfa"];
+// Deliberately outside BAND_COLOURS: a marker must not read as a placement.
+const MARKER_COLOUR = "#e879f9";
 
 const $ = (id) => document.getElementById(id);
 const charts = {};
@@ -254,6 +279,60 @@ function boundaryMarkers(getBoundaries) {
 }
 
 let moveBoundaries = [];
+let allMarkers = [];       // whole history; the draw hook drops what is off-plot
+let markerArmed = false;
+
+/* Markers reuse the draw-hook pattern above, and are registered in makeChart
+   rather than per chart -- that is the whole of "one marker shows on all six".
+
+   Solid where a move is dashed, and labelled where a move is not: a move is
+   already named by the band in the timeline, whereas "opened windows" has
+   nowhere else to say what it was.
+
+   No range filtering. The bbox test below drops anything off-plot, so the
+   plugin is handed every marker and decides for itself. */
+function eventMarkers(getMarkers) {
+  return { hooks: { draw: (u) => {
+    const marks = getMarkers();
+    if (!marks.length) return;
+    const ctx = u.ctx;
+    const right = u.bbox.left + u.bbox.width;
+    ctx.save();
+    ctx.strokeStyle = MARKER_COLOUR;
+    ctx.fillStyle = MARKER_COLOUR;
+    ctx.lineWidth = 1;
+    ctx.font = "11px system-ui, sans-serif";
+    ctx.textBaseline = "top";
+    for (const m of marks) {
+      const x = Math.round(u.valToPos(m.ts, "x", true)) + 0.5;
+      if (x < u.bbox.left || x > right) continue;
+      ctx.beginPath();
+      ctx.moveTo(x, u.bbox.top);
+      ctx.lineTo(x, u.bbox.top + u.bbox.height);
+      ctx.stroke();
+      // Flip the label to the left of its rule near the right edge, so a marker
+      // placed late in the window does not write itself off the plot.
+      const flip = x + 4 + ctx.measureText(m.label).width > right;
+      ctx.textAlign = flip ? "right" : "left";
+      ctx.fillText(m.label, flip ? x - 4 : x + 4, u.bbox.top + 2);
+    }
+    ctx.restore();
+  } } };
+}
+
+/* Placing a marker is a click, and uPlot starts a zoom on a drag -- both end in
+   a click event. Anything that moved more than a few pixels between down and up
+   was a zoom, so it must not also drop a marker where the drag ended. */
+function markerClicks(u) {
+  let downX = null;
+  u.over.addEventListener("mousedown", (ev) => { downX = ev.clientX; });
+  u.over.addEventListener("click", (ev) => {
+    if (!markerArmed) return;
+    if (downX !== null && Math.abs(ev.clientX - downX) > 3) return;
+    const rect = u.over.getBoundingClientRect();
+    placeMarker(Math.round(u.posToVal(ev.clientX - rect.left, "x")));
+  });
+}
 
 function makeChart(el, labels, colours, data) {
   const opts = {
@@ -261,7 +340,8 @@ function makeChart(el, labels, colours, data) {
     height: 200,
     cursor: { y:false },
     scales: { x:{ time:true } },
-    plugins: [ boundaryMarkers(() => moveBoundaries) ],
+    hooks: { ready: [ markerClicks ] },
+    plugins: [ boundaryMarkers(() => moveBoundaries), eventMarkers(() => allMarkers) ],
     axes: [
       { stroke:"#98a2b3", grid:{ stroke:"#232a36" }, ticks:{ stroke:"#232a36" } },
       { stroke:"#98a2b3", grid:{ stroke:"#232a36" }, ticks:{ stroke:"#232a36" } },
@@ -399,8 +479,6 @@ async function refreshPlacements() {
       + 'Use “Move it here” above so readings stop accumulating as Unknown.</td></tr>';
     return;
   }
-  const local = (ts) => ts == null ? "" :
-    new Date(ts*1000 - new Date().getTimezoneOffset()*60000).toISOString().slice(0,16);
   body.innerHTML =
     "<tr><th>Room</th><th>From</th><th>Until</th><th>Note</th><th></th></tr>" +
     placements.map(p => `
@@ -408,16 +486,72 @@ async function refreshPlacements() {
         <td><select class="p-room">${
           rooms.map(r => `<option${r.name===p.room?" selected":""}>${r.name}</option>`).join("")
         }</select></td>
-        <td><input class="p-start" type="datetime-local" value="${local(p.start_ts)}"></td>
-        <td><input class="p-end" type="datetime-local" value="${local(p.end_ts)}"></td>
+        <td><input class="p-start" type="datetime-local" value="${localInput(p.start_ts)}"></td>
+        <td><input class="p-end" type="datetime-local" value="${localInput(p.end_ts)}"></td>
         <td><input class="p-note" value="${p.note ? p.note.replace(/"/g,"&quot;") : ""}"></td>
         <td><button class="secondary p-save">Save</button></td>
       </tr>`).join("");
 }
 
+const localInput = (ts) => ts == null ? "" :
+  new Date(ts*1000 - new Date().getTimezoneOffset()*60000).toISOString().slice(0,16);
+
+/* `redraw` is false when a series refresh is already in flight: that rebuilds
+   every chart from scratch, and redrawing one it is midway through destroying
+   throws. Standalone calls -- after placing or editing a marker -- do want it,
+   since nothing else is going to repaint. */
+async function refreshMarkers(redraw = true) {
+  const { markers } = await api("/markers");
+  allMarkers = markers;
+  // Autocomplete from the whole history, not just what is on screen -- typing
+  // "opened windows" a second time should not invent a second spelling of it.
+  $("markerLabels").innerHTML =
+    [...new Set(markers.map(m => m.label))]
+      .map(l => `<option value="${l.replace(/"/g,"&quot;")}">`).join("");
+  const body = $("markers").querySelector("tbody");
+  body.innerHTML = markers.length
+    ? "<tr><th>When</th><th>Label</th><th></th></tr>" + markers.map(m => `
+        <tr data-id="${m.id}">
+          <td><input class="m-ts" type="datetime-local" value="${localInput(m.ts)}"></td>
+          <td><input class="m-label" value="${m.label.replace(/"/g,"&quot;")}"></td>
+          <td><button class="secondary m-save">Save</button>
+              <button class="secondary m-del">Delete</button></td>
+        </tr>`).join("")
+    : '<tr><td class="empty">No markers yet. Label one above, then click a chart.</td></tr>';
+  // The plugin reads allMarkers through a closure, so a redraw is enough here;
+  // the series never needs refetching just because an annotation changed.
+  if (redraw) Object.values(charts).forEach(u => u.redraw());
+}
+
+function setArmed(on) {
+  markerArmed = on;
+  $("markBtn").setAttribute("aria-pressed", String(on));
+  $("markBtn").textContent = on ? "Click a chart… (Esc to cancel)" : "Place on a chart…";
+  document.body.classList.toggle("arming", on);
+}
+
+async function placeMarker(ts) {
+  const label = $("markerLabel").value.trim();
+  if (!label) { say($("markMsg"), "Type a label first.", "err"); return; }
+  setArmed(false);
+  try {
+    await api("/markers", {
+      method:"POST",
+      headers:{ "Content-Type":"application/json" },
+      body: JSON.stringify({ ts, label }),
+    });
+    $("markerLabel").value = "";
+    say($("markMsg"), `Marked “${label}” at ${new Date(ts*1000).toLocaleString()}.`, "ok");
+    await refreshMarkers();
+  } catch (err) {
+    say($("markMsg"), err.message, "err");
+  }
+}
+
 async function refreshAll() {
   try {
-    await Promise.all([refreshStatus(), refreshSeries(), refreshPlacements()]);
+    await Promise.all([refreshStatus(), refreshSeries(), refreshPlacements(),
+                       refreshMarkers(false)]);
   } catch (err) {
     say($("histMsg"), `Could not load: ${err.message}`, "err");
   }
@@ -479,6 +613,56 @@ $("placements").addEventListener("click", async (ev) => {
     await refreshAll();
   } catch (err) {
     say($("histMsg"), err.message, "err");
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+$("markBtn").addEventListener("click", () => {
+  if (markerArmed) { setArmed(false); return; }
+  if (!$("markerLabel").value.trim()) {
+    say($("markMsg"), "Type a label first.", "err");
+    $("markerLabel").focus();
+    return;
+  }
+  $("markMsg").className = "msg";   // clear, not show-an-empty-box
+  setArmed(true);
+});
+
+// Arming changes what a click on a chart means, so there has to be a way out
+// that is not "click something and undo it".
+addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape" && markerArmed) setArmed(false);
+});
+
+$("markers").addEventListener("click", async (ev) => {
+  const btn = ev.target.closest(".m-save, .m-del");
+  if (!btn) return;
+  const tr = btn.closest("tr");
+  const id = tr.dataset.id;
+  const del = btn.classList.contains("m-del");
+  if (del && !confirm("Delete this marker?")) return;
+  btn.disabled = true;
+  try {
+    if (del) {
+      await api(`/markers/${id}`, { method:"DELETE" });
+      say($("markHistMsg"), "Deleted.", "ok");
+    } else {
+      const when = tr.querySelector(".m-ts").value;
+      if (!when) throw new Error("A marker needs a time.");
+      await api(`/markers/${id}`, {
+        method:"PATCH",
+        headers:{ "Content-Type":"application/json" },
+        body: JSON.stringify({
+          ts: Math.floor(new Date(when).getTime()/1000),
+          label: tr.querySelector(".m-label").value,
+        }),
+      });
+      say($("markHistMsg"), "Saved.", "ok");
+    }
+    await refreshMarkers();
+  } catch (err) {
+    say($("markHistMsg"), err.message, "err");
   } finally {
     btn.disabled = false;
   }

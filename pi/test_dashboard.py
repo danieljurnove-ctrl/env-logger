@@ -11,8 +11,10 @@ Skipped when node is absent, so a Pi without it still runs the rest of the suite
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
+import tempfile
 import textwrap
 
 import pytest
@@ -103,3 +105,30 @@ def test_charts_break_on_outages_but_tolerate_bucket_jitter(tmp_path):
         ["node", str(script)], capture_output=True, text=True, timeout=60
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_inline_script_parses():
+    """The dashboard is one file with no build step, so nothing else would catch
+    a syntax error in it -- the page would simply load blank on the Pi.
+
+    `node --check` parses without executing, so uPlot and the DOM being absent
+    here does not matter.
+    """
+    if shutil.which("node") is None:
+        pytest.skip("node not installed")
+    with open(INDEX, encoding="utf-8") as fh:
+        html = fh.read()
+    blocks = re.findall(r"<script>\n(.*?)\n</script>", html, re.S)
+    assert len(blocks) == 1, f"expected one inline script, found {len(blocks)}"
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".js", delete=False, encoding="utf-8"
+    ) as fh:
+        fh.write(blocks[0])
+        path = fh.name
+    try:
+        result = subprocess.run(
+            ["node", "--check", path], capture_output=True, text=True
+        )
+        assert result.returncode == 0, result.stderr
+    finally:
+        os.unlink(path)
