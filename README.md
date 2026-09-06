@@ -109,6 +109,56 @@ corrected by editing one row rather than rewriting thousands. See
 
 ---
 
+## What you can learn from it
+
+The point isn't the graphs, it's the questions they settle — and per
+[Purpose](docs/design.md#purpose), those are comparisons: this room versus that one, this week
+versus last, before versus after you changed something.
+
+**CO₂ is a ventilation meter.** Humans are the only significant indoor source, so ppm tracks how
+much of your own exhaled air you're rebreathing. Outdoor is ~420; under 800 is well ventilated,
+1000–1500 is stuffy, and a closed bedroom with two people in it will often reach 2000–3000 by
+morning. That's a testable hypothesis about why you wake up groggy: door shut, door open, two
+nights, compare. Relative trend is all this needs, which is why the SCD-41's shaky absolute
+calibration doesn't matter here.
+
+The decay curve after everyone leaves a room gives you **air changes per hour** — a genuine
+quantitative ventilation figure for that room, from the exponential fit back toward outdoor
+baseline.
+
+**Particulates are mostly a kitchen story.** Cooking dominates indoor PM; searing or frying can
+push PM2.5 into the hundreds of µg/m³ against a WHO 24-hour guideline of 15. What this settles:
+whether your range hood actually works, whether opening a window beats it (usually yes), and
+whether an air purifier earns its filter cost — measure the clearance rate with and without.
+
+For the quieter question of "is this room dustier than that one", watch the **counts**, not the
+mass. Mass is derived and rounded to an integer, so a clean room reads 0 µg/m³ for hours while
+the 0.3 µm channel moves over hundreds.
+
+**Temperature and humidity are where portability pays off.** One calibrated sensor moved between
+rooms beats several uncalibrated ones, because the difference you measure is real rather than
+instrument spread. That gives you a room-by-room thermal survey, including how fast each room
+loses heat overnight — a crude but real insulation ranking.
+
+Watch dew point rather than RH. It's computed on read from the same two values, and unlike RH
+it's absolute: if a window or wall sits below it you get condensation, which is what actually
+grows mould.
+
+**Pressure** is mainly a weather trend line. Its real job here is feeding ambient pressure
+compensation to the SCD-41 so the CO₂ figures are correct.
+
+### What it does not measure
+
+- **Carbon monoxide.** CO and CO₂ are different molecules and the SCD-41 sees only CO₂. **This is
+  not a CO detector and will not warn you about a faulty furnace or a blocked flue.** Keep a
+  certified CO alarm; nothing here substitutes for one.
+- **VOCs** — paint, solvents, cleaning products, off-gassing. Needs a separate sensor; see
+  [possible upgrades](docs/hardware.md#possible-upgrades).
+- **Radon**, formaldehyde, and anything else chemically specific.
+- Optical PM sensors also drift with age and can't tell cooking smoke from pollen.
+
+---
+
 ## Roadmap
 
 Ordered by risk, not by ease.

@@ -186,6 +186,64 @@ most of the useful questions ("is this room stuffy by bedtime?") actually depend
 
 ---
 
+## Possible upgrades
+
+Not ordered, not planned — recorded so the reasoning isn't lost.
+
+### The highest-value addition isn't a sensor
+
+**A second node.** Every question in [Purpose](design.md#purpose) is a comparison, and right now
+comparisons are sequential: carry the node to the bedroom, wait, carry it to the office, wait.
+Two nodes make them simultaneous, which removes the confound that the two rooms were measured at
+different times of day with different weather outside.
+
+Put the second one **outdoors** and it does double duty as a baseline. PM2.5 of 20 µg/m³ means
+"your kitchen is smoky" on a clean day and "the windows aren't sealing" during a wildfire. CO₂
+decay needs an outdoor baseline for a true air-change figure, and heat-loss rates need outdoor
+temperature to normalise against. A Feather with just a BME280 and an SCD-41 covers it, and the
+schema already supports multiple nodes. Cheaper still: pull a public AQI/weather API into the
+same database as a pseudo-node.
+
+### Sensors worth adding
+
+| Sensor | Adafruit PID | ESPHome | Fills |
+| --- | --- | --- | --- |
+| Sensirion **SGP41** VOC + NOx | [6455](https://www.adafruit.com/product/6455) | [`sgp4x`](https://esphome.io/components/sensor/sgp4x/) | The biggest real gap |
+| **VEML7700** ambient light | [4162](https://www.adafruit.com/product/4162) | verify before buying | Context, sleep/circadian |
+| **LD2410** mmWave presence | third-party | [`ld2410`](https://esphome.io/components/sensor/ld2410/) | Occupancy — but see the UART conflict |
+
+**SGP41** is the one to buy first. It's STEMMA QT, so it daisy-chains onto the existing I²C run
+with no wiring and no free GPIO needed, and it covers what nothing here can currently see:
+cooking gases, cleaning products, solvents, new-furniture off-gassing. ESPHome's `sgp4x`
+autodetects SGP40 versus SGP41 and exposes `voc_index` and `nox_index`.
+
+Two caveats. It reports Sensirion's unitless Gas Index rather than a concentration — a *relative*
+signal that needs a learning period to establish its baseline, not an absolute ppb figure. That
+suits room comparison but means the index is not portable between rooms until it has settled,
+which interacts badly with moving the node daily. And the component drives the sensor at 1 Hz
+internally regardless of `update_interval`, which matters for a battery build but not here.
+
+**LD2410** would make CO₂ genuinely interpretable, since knowing whether a room is occupied turns
+a CO₂ curve into a ventilation measurement rather than a guess. But it wants a hardware UART at
+256000 baud and the PMS5003 already has the obvious one (GPIO7/8, and note those two pins already
+need `ignore_pin_validation_error`). The ESP32 has three UARTs, so it's solvable on other pins —
+just not free.
+
+### Deliberately not recommended
+
+- **A DIY carbon monoxide sensor.** CO is a real safety gap in this build, and the right fix is a
+  certified CO alarm from a shop, not an MQ-7 on a breadboard. Cheap electrochemical CO sensors
+  drift, need calibration, and carry no alarm certification. Don't build the thing whose job is to
+  wake you up.
+- **BME680 as a BME280 replacement.** It adds a gas-resistance reading, but turning that into a
+  useful IAQ figure depends on Bosch's BSEC library, whose ESPHome support is awkward and
+  licence-encumbered. The SGP41 does this job better as a separate device.
+- **Radon** is a genuine health risk and completely invisible here, but it belongs to a dedicated
+  device with a long integration time, not this node. Worth a one-off test kit regardless of this
+  project.
+
+---
+
 ## Flashing
 
 The first flash is over USB-C, from a laptop. Use a **data** cable; charge-only USB-C cables are
