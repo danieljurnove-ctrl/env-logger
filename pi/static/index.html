@@ -67,6 +67,8 @@
   .empty { color:var(--dim); padding:20px 0; text-align:center }
   .u-legend { font-size:12px }
   .hint { color:var(--dim); font-size:12px }
+  .candidate { margin-top:8px; padding:8px 10px; border:1px dashed var(--line);
+               border-radius:6px }
   /* Arming has to be visible. The click that places a marker is the same
      gesture uPlot uses to begin a zoom drag, so without the cursor change an
      armed chart looks exactly like an idle one. */
@@ -91,6 +93,10 @@
       <button id="moveBtn">Move it here</button>
     </div>
     <div class="timeline" id="timeline"></div>
+    <!-- Every move is an unplug, so every move is a reboot with a gap. The
+         converse is not true, which is why these are offered rather than
+         recorded automatically. -->
+    <div id="candidates"></div>
     <div class="msg" id="moveMsg"></div>
   </section>
 
@@ -128,6 +134,15 @@
     <div class="table-wrap"><table id="markers"><tbody></tbody></table></div>
     <div class="msg" id="markHistMsg"></div>
   </section>
+
+  <section class="panel">
+    <h2>Export</h2>
+    <div class="row">
+      <button class="secondary" id="exportRange">Download this range (CSV)</button>
+      <button class="secondary" id="exportAll">Download everything (CSV)</button>
+      <span class="hint">Raw rows, room resolved per reading — for questions this page does not answer.</span>
+    </div>
+  </section>
 </main>
 
 <script src="/static/vendor/uPlot.iife.min.js"></script>
@@ -160,6 +175,7 @@ const MARKER_COLOUR = "#e879f9";
 
 const $ = (id) => document.getElementById(id);
 const charts = {};
+const chartEls = {};   // key -> container, so a resize can measure without a refetch
 
 async function api(path, options) {
   const res = await fetch(path, { credentials:"same-origin", ...options });
@@ -175,11 +191,17 @@ function say(el, text, kind) {
   if (kind === "ok") setTimeout(() => { el.className = "msg"; }, 4000);
 }
 
+/* Split in two because a gap is a length, not a moment: "a gap of 11 min ago"
+   is what you get from reusing the timestamp formatter for a duration. */
+function duration(seconds) {
+  if (seconds < 90) return `${seconds}s`;
+  if (seconds < 5400) return `${Math.round(seconds/60)} min`;
+  if (seconds < 172800) return `${(seconds/3600).toFixed(1)} h`;
+  return `${Math.round(seconds/86400)} days`;
+}
+
 function ago(seconds) {
-  if (seconds < 90) return `${seconds}s ago`;
-  if (seconds < 5400) return `${Math.round(seconds/60)} min ago`;
-  if (seconds < 172800) return `${(seconds/3600).toFixed(1)} h ago`;
-  return `${Math.round(seconds/86400)} days ago`;
+  return `${duration(seconds)} ago`;
 }
 
 // ---------------------------------------------------------------- rendering
@@ -366,7 +388,7 @@ function makeChart(el, labels, colours, data) {
    the API returns and what the archive holds. Display is the only place this
    belongs, so changing your mind later is a browser refresh rather than a
    migration of every historical row. */
-function drawChart(key, el, labels, colours, series, transform) {
+function drawChart(key, el, labels, colours, series, transform, resetScales) {
   let data = toData(series.segments, labels.map(l => l.metric), series.columns);
   if (transform) {
     data = [data[0], ...data.slice(1).map(a => a.map(v => v == null ? null : transform(v)))];
@@ -377,7 +399,19 @@ function drawChart(key, el, labels, colours, series, transform) {
     if (charts[key]) { charts[key].destroy(); delete charts[key]; }
     return;
   }
-  if (charts[key]) { charts[key].destroy(); delete charts[key]; }
+  chartEls[key] = el;
+  /* Reuse the instance when it is still the right shape. `setData` with
+     resetScales false keeps the current x-scale, which is the whole point:
+     the 60-second refresh used to destroy and rebuild every chart, so a
+     drag-zoom into last night's curve was thrown away a minute later --
+     against a dashboard whose entire purpose is comparing specific stretches
+     of time. Scales are reset only when the range buttons change the window. */
+  const chart = charts[key];
+  if (chart && chart.series.length === labels.length + 1) {
+    chart.setData(data, Boolean(resetScales));
+    return;
+  }
+  if (chart) { chart.destroy(); delete charts[key]; }
   el.innerHTML = "";
   charts[key] = makeChart(el, labels.map(l => l.label), colours, data);
 }
@@ -424,7 +458,7 @@ async function refreshStatus() {
     : "location unrecorded";
 }
 
-async function refreshSeries() {
+async function refreshSeries(resetScales) {
   const to = Math.floor(Date.now()/1000);
   const from = to - range.seconds;
   const q = new URLSearchParams({
@@ -436,19 +470,19 @@ async function refreshSeries() {
     .filter(s => s.rows.length)
     .map(s => s.rows[0][0]);
   drawTimeline(series.segments, from, to);
-  drawChart("co2", $("c-co2"), [{metric:"co2_ppm", label:"CO₂"}], ["#4ade80"], series);
+  drawChart("co2", $("c-co2"), [{metric:"co2_ppm", label:"CO₂"}], ["#4ade80"], series, null, resetScales);
   drawChart("temp", $("c-temp"),
     [{metric:"bme_temp_c", label:"BME280"}, {metric:"scd_temp_c", label:"SCD-41"}],
-    ["#4c8dff","#fbbf24"], series, cToF);
+    ["#4c8dff","#fbbf24"], series, cToF, resetScales);
   drawChart("rh", $("c-rh"),
     [{metric:"bme_rh_pct", label:"BME280"}, {metric:"scd_rh_pct", label:"SCD-41"}],
-    ["#4c8dff","#fbbf24"], series);
+    ["#4c8dff","#fbbf24"], series, null, resetScales);
   drawChart("press", $("c-press"), [{metric:"pressure_hpa", label:"Pressure"}],
-    ["#22d3ee"], series);
+    ["#22d3ee"], series, null, resetScales);
   drawChart("pm", $("c-pm"),
     [{metric:"pm1_0_atm", label:"PM1.0"}, {metric:"pm2_5_atm", label:"PM2.5"},
      {metric:"pm10_atm", label:"PM10"}],
-    ["#a78bfa","#f472b6","#fb923c"], series);
+    ["#a78bfa","#f472b6","#fb923c"], series, null, resetScales);
   // All six the sensor reports. The coarse ones sit at zero indoors, which is
   // information rather than clutter -- and uPlot's legend toggles series, so
   // anything you don't want is one click away.
@@ -456,7 +490,7 @@ async function refreshSeries() {
     [{metric:"pm0_3_count", label:"≥0.3µm"}, {metric:"pm0_5_count", label:"≥0.5µm"},
      {metric:"pm1_0_count", label:"≥1.0µm"}, {metric:"pm2_5_count", label:"≥2.5µm"},
      {metric:"pm5_0_count", label:"≥5.0µm"}, {metric:"pm10_count", label:"≥10µm"}],
-    ["#a78bfa","#38bdf8","#4ade80","#fbbf24","#f472b6","#f87171"], series);
+    ["#a78bfa","#38bdf8","#4ade80","#fbbf24","#f472b6","#f87171"], series, null, resetScales);
 }
 
 async function refreshRooms() {
@@ -548,10 +582,33 @@ async function placeMarker(ts) {
   }
 }
 
+/* boot_count has been written on every row since the node's first POST and read
+   by nothing. A gap plus an increment is the node having been unplugged, carried
+   and plugged back in -- which is exactly a move you forgot to record. Offered,
+   never assumed: an OTA update reboots too. */
+async function refreshCandidates() {
+  const el = $("candidates");
+  let candidates = [];
+  try {
+    ({ candidates } = await api("/api/candidate-moves"));
+  } catch (err) {
+    el.innerHTML = "";
+    return;
+  }
+  if (!candidates.length) { el.innerHTML = ""; return; }
+  el.innerHTML = candidates.slice(0, 5).map(c => `
+    <div class="candidate row" data-ts="${c.ts}">
+      <span class="hint">Gap of ${duration(c.gap_seconds)} with a reboot at
+        ${new Date(c.ts*1000).toLocaleString()} — was this a move?</span>
+      <button class="secondary c-move">Record move here</button>
+      <button class="secondary c-dismiss">Not a move</button>
+    </div>`).join("");
+}
+
 async function refreshAll() {
   try {
-    await Promise.all([refreshStatus(), refreshSeries(), refreshPlacements(),
-                       refreshMarkers(false)]);
+    await Promise.all([refreshStatus(), refreshSeries(true), refreshPlacements(),
+                       refreshMarkers(false), refreshCandidates()]);
   } catch (err) {
     say($("histMsg"), `Could not load: ${err.message}`, "err");
   }
@@ -566,7 +623,7 @@ $("ranges").addEventListener("click", (ev) => {
   if (!btn) return;
   range = RANGES[+btn.dataset.i];
   [...$("ranges").children].forEach(b => b.setAttribute("aria-pressed", b === btn));
-  refreshSeries().catch(err => say($("histMsg"), err.message, "err"));
+  refreshSeries(true).catch(err => say($("histMsg"), err.message, "err"));
 });
 
 $("moveBtn").addEventListener("click", async () => {
@@ -668,10 +725,50 @@ $("markers").addEventListener("click", async (ev) => {
   }
 });
 
+$("candidates").addEventListener("click", async (ev) => {
+  const btn = ev.target.closest(".c-move, .c-dismiss");
+  if (!btn) return;
+  const row = btn.closest(".candidate");
+  if (btn.classList.contains("c-dismiss")) { row.remove(); return; }
+  const room = ($("roomNew").value.trim() || $("roomPick").value || "").trim();
+  if (!room) { say($("moveMsg"), "Pick or name a room first.", "err"); return; }
+  btn.disabled = true;
+  try {
+    // start_ts is the reboot, not now: the point of the prompt is that the move
+    // already happened and the readings since then are mislabelled.
+    await api("/placements", {
+      method:"POST",
+      headers:{ "Content-Type":"application/json" },
+      body: JSON.stringify({ node:"feather-01", room, start_ts: Number(row.dataset.ts) }),
+    });
+    $("roomNew").value = "";
+    say($("moveMsg"), `Recorded: in the ${room} from that reboot onward.`, "ok");
+    await refreshAll();
+  } catch (err) {
+    say($("moveMsg"), err.message, "err");
+    btn.disabled = false;
+  }
+});
+
+// Downloads go through a plain navigation rather than fetch: the cookie rides
+// along, and the browser gets the Content-Disposition filename for free.
+$("exportRange").addEventListener("click", () => {
+  const to = Math.floor(Date.now()/1000);
+  location.href = `/api/export?from=${to - range.seconds}&to=${to}`;
+});
+$("exportAll").addEventListener("click", () => { location.href = "/api/export"; });
+
 let resizeTimer;
 addEventListener("resize", () => {
   clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(() => refreshSeries().catch(() => {}), 200);
+  // setSize, not a refetch: rotating a phone should not cost a round trip to
+  // the Pi, and must not discard a zoom either.
+  resizeTimer = setTimeout(() => {
+    for (const [key, u] of Object.entries(charts)) {
+      const el = chartEls[key];
+      if (el) u.setSize({ width: el.clientWidth || 800, height: 200 });
+    }
+  }, 200);
 });
 
 refreshAll();

@@ -108,6 +108,8 @@ Every one of them requires `X-Auth-Token`. A tailnet is a flat network.
 | `DELETE` | `/markers/:id` | Returns `204` |
 | `GET` | `/api/status` | Liveness: last reading, seconds since, current room |
 | `GET` | `/api/series` | Chart data, segmented by placement |
+| `GET` | `/api/candidate-moves` | Reboots with a gap that no placement explains |
+| `GET` | `/api/export` | Raw rows as CSV, room resolved per reading |
 | `GET` | `/rooms` | The room preset list |
 | `GET` | `/` | The dashboard |
 | `POST` | `/login` | Exchanges the token for a cookie |

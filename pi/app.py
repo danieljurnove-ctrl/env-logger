@@ -14,17 +14,20 @@ or, in production, via the waitress entry point in systemd/envlog.service.
 from __future__ import annotations
 
 import atexit
+import csv
 import hmac
+import io
 import os
 import sqlite3
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from functools import wraps
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from flask import (
-    Flask, current_app, g, jsonify, redirect, request, send_from_directory
+    Flask, Response, current_app, g, jsonify, redirect, request,
+    send_from_directory,
 )
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -727,6 +730,144 @@ def create_app(db_path=None, token=None, flush_interval=None, start_flusher=True
         with conn:
             conn.execute("DELETE FROM markers WHERE id = ?", (marker_id,))
         return "", 204
+
+    # ----------------------------------------------------------------- export
+
+    @app.get("/api/export")
+    @_require_token
+    def export_csv():
+        """Raw rows as CSV, so a question the dashboard does not answer can be
+        answered in a spreadsheet instead of by growing the dashboard."""
+        conn = _get_db()
+        if not conn.execute("SELECT 1 FROM nodes LIMIT 1").fetchone():
+            return Response("", mimetype="text/csv")
+        node_id, node_name = _resolve_node(conn, request.args.get("node"))
+
+        bounds, params = [], [node_id]
+        for field, op in (("from", ">="), ("to", "<=")):
+            raw = request.args.get(field)
+            if raw is None:
+                continue
+            try:
+                params.append(int(raw))
+            except (TypeError, ValueError):
+                raise ValidationError(f"'{field}' must be an integer unix timestamp")
+            bounds.append(f"AND r.ts {op} ?")
+
+        # Room comes from the placement covering each reading, the same range
+        # join the charts use -- an export without it loses the one dimension
+        # the whole project is organised around.
+        sql = f"""
+            SELECT r.ts,
+                   COALESCE(m.name, 'Unknown') AS room,
+                   {', '.join('r.' + c for c in SENSOR_COLUMNS)},
+                   r.boot_count
+            FROM readings r
+            LEFT JOIN placements p
+              ON  p.node_id = r.node_id
+              AND r.ts >= p.start_ts
+              AND (p.end_ts IS NULL OR r.ts < p.end_ts)
+            LEFT JOIN rooms m ON m.id = p.room_id
+            WHERE r.node_id = ? {' '.join(bounds)}
+            ORDER BY r.ts
+        """
+        header = ("ts", "iso_utc", "room") + SENSOR_COLUMNS + ("boot_count",)
+
+        db_path = current_app.config["ENVLOG_DB"]
+
+        def rows():
+            # Streamed: a year of readings is a few hundred thousand rows, and
+            # building that in memory on a Pi to hand back one string is the
+            # kind of thing that works in testing and dies in the field.
+            #
+            # Its own connection, deliberately. A generator is consumed *after*
+            # the request context has torn down, and the request-scoped
+            # connection is closed by then -- so reusing g.db raises
+            # "Cannot operate on a closed database" at the first row.
+            export_conn = connect(db_path)
+            buf = io.StringIO()
+            writer = csv.writer(buf)
+
+            def drain():
+                value = buf.getvalue()
+                buf.seek(0)
+                buf.truncate(0)
+                return value
+
+            try:
+                writer.writerow(header)
+                yield drain()
+                for row in export_conn.execute(sql, params):
+                    ts = int(row["ts"])
+                    writer.writerow(
+                        [ts, datetime.fromtimestamp(ts, timezone.utc).isoformat()]
+                        + [row[c] for c in ("room",) + SENSOR_COLUMNS + ("boot_count",)]
+                    )
+                    yield drain()
+            finally:
+                export_conn.close()
+
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
+        return Response(
+            rows(),
+            mimetype="text/csv",
+            headers={
+                "Content-Disposition":
+                    f'attachment; filename="envlog-{node_name}-{stamp}.csv"'
+            },
+        )
+
+    # ------------------------------------------------------- candidate moves
+
+    # A move means unplugging the node, carrying it, and plugging it back in --
+    # so every move is a reboot with a gap in the readings. The converse does not
+    # hold (a power blip or an OTA reboots without going anywhere), which is why
+    # these are candidates to confirm rather than placements to create.
+    CANDIDATE_GAP_SECONDS = 120
+
+    @app.get("/api/candidate-moves")
+    @_require_token
+    def candidate_moves():
+        conn = _get_db()
+        if not conn.execute("SELECT 1 FROM nodes LIMIT 1").fetchone():
+            return jsonify(candidates=[])
+        node_id, node_name = _resolve_node(conn, request.args.get("node"))
+        # Window functions are 3.25, comfortably under the deployed 3.27.2.
+        rows = conn.execute(
+            """SELECT ts, prev_ts, boot_count, prev_boot FROM (
+                   SELECT ts, boot_count,
+                          LAG(ts)         OVER (ORDER BY ts) AS prev_ts,
+                          LAG(boot_count) OVER (ORDER BY ts) AS prev_boot
+                   FROM readings
+                   WHERE node_id = ? AND boot_count IS NOT NULL
+               )
+               WHERE prev_boot IS NOT NULL
+                 AND boot_count > prev_boot
+                 AND ts - prev_ts >= ?
+               ORDER BY ts DESC""",
+            (node_id, CANDIDATE_GAP_SECONDS),
+        ).fetchall()
+
+        # Drop the ones already explained. A placement that starts inside the gap
+        # is you having already recorded this move, and nagging about it again is
+        # how a useful prompt becomes noise you learn to ignore.
+        explained = [
+            r["start_ts"]
+            for r in conn.execute(
+                "SELECT start_ts FROM placements WHERE node_id = ?", (node_id,)
+            ).fetchall()
+        ]
+        candidates = [
+            {
+                "ts": int(r["ts"]),
+                "prev_ts": int(r["prev_ts"]),
+                "gap_seconds": int(r["ts"] - r["prev_ts"]),
+                "boot_count": int(r["boot_count"]),
+            }
+            for r in rows
+            if not any(r["prev_ts"] <= s <= r["ts"] for s in explained)
+        ]
+        return jsonify(node=node_name, candidates=candidates)
 
     # -------------------------------------------------------------- read API
 

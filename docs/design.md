@@ -77,8 +77,8 @@ is easy to breach by accident: no `STRICT` tables (3.37), no `RETURNING` (3.35),
 no `unixepoch()` (3.38), no generated columns (3.31).
 
 `VACUUM INTO`, which the nightly backup depends on, arrived in 3.27.0 — one patch release below
-what is installed. Everything currently in use is comfortably older than that: `ON CONFLICT DO
-NOTHING` is 3.24 and there are no window functions. See
+what is installed. Everything else in use is comfortably older: `ON CONFLICT DO NOTHING` is 3.24,
+and the one window function (`LAG`, in candidate-move detection) is 3.25. See
 [deployment.md](deployment.md#sqlite-is-3272-and-that-is-the-real-ceiling).
 
 ---
@@ -428,6 +428,35 @@ marker and drops what falls outside the plot, so no range filtering is needed an
 too varied to enumerate up front, but repeat often enough that typing "opened windows" twice
 should not produce two spellings. `GET /markers` is unbounded for the same reason — these are
 hand-typed events, a few a day at most, so the whole history is a small payload.
+
+### Candidate moves
+
+`boot_count` arrives on every reading and, until now, was read by nothing.
+
+A move means unplugging the node, carrying it and plugging it back in, so **every
+move is a reboot with a gap**. The converse does not hold — an OTA update or a
+power blip reboots without going anywhere — which is why these are offered as
+prompts rather than turned into placements automatically. A candidate is a
+`boot_count` increment with at least 120 s of silence before it, and one whose
+gap already contains a placement start is dropped: nagging about a move you
+already recorded is how a useful prompt becomes noise.
+
+Accepting one opens the placement at *the reboot*, not at now, because the whole
+point is that the readings since then are already mislabelled.
+
+### Export
+
+`GET /api/export` streams raw rows as CSV with the room resolved per reading via
+the same range join the charts use — an export without it loses the one dimension
+the project is organised around.
+
+Streamed rather than assembled, and on **its own connection**: a Flask generator
+is consumed after the request context has torn down, so reusing the
+request-scoped connection raises `Cannot operate on a closed database` at the
+first row. The tests caught exactly that.
+
+It exists so that a question this dashboard does not answer can be answered in a
+spreadsheet, instead of every such question becoming a feature request.
 
 ### Comparison view — proposed, not built
 
