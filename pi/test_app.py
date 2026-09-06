@@ -63,6 +63,8 @@ def rows(app):
         ("post", "/markers"),
         ("patch", "/markers/1"),
         ("delete", "/markers/1"),
+        ("get", "/api/candidate-moves"),
+        ("get", "/api/export"),
     ],
 )
 def test_every_endpoint_requires_the_token(client, method, path):
@@ -540,3 +542,93 @@ def test_marker_is_deletable(client):
 def test_unknown_marker_is_404(client):
     assert client.patch("/markers/999", json={"label": "x"}, headers=AUTH).status_code == 404
     assert client.delete("/markers/999", headers=AUTH).status_code == 404
+
+
+# ------------------------------------------------------------ candidate moves
+
+
+def _readings(app, samples):
+    """Write rows directly: the buffer stamps ts itself, and these tests need
+    control over the gaps."""
+    conn = connect(app.config["ENVLOG_DB"])
+    try:
+        conn.execute("INSERT OR IGNORE INTO nodes (id, name) VALUES (1, 'feather-01')")
+        for ts, boot in samples:
+            conn.execute(
+                "INSERT INTO readings (node_id, ts, co2_ppm, boot_count) "
+                "VALUES (1, ?, 600, ?)",
+                (ts, boot),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_reboot_after_a_gap_is_a_candidate_move(app, client):
+    _readings(app, [(1000, 1), (1045, 1), (1600, 2), (1645, 2)])
+    got = client.get("/api/candidate-moves", headers=AUTH).get_json()["candidates"]
+    assert [c["ts"] for c in got] == [1600]
+    assert got[0]["gap_seconds"] == 555
+
+
+def test_reboot_without_a_gap_is_not_a_move(app, client):
+    """An OTA update or a power blip reboots without going anywhere."""
+    _readings(app, [(1000, 1), (1045, 2), (1090, 2)])
+    assert client.get("/api/candidate-moves", headers=AUTH).get_json()["candidates"] == []
+
+
+def test_gap_without_a_reboot_is_not_a_move(app, client):
+    """WiFi outage: readings stop and resume, but the node never power-cycled."""
+    _readings(app, [(1000, 1), (9000, 1)])
+    assert client.get("/api/candidate-moves", headers=AUTH).get_json()["candidates"] == []
+
+
+def test_already_recorded_move_is_not_offered_again(app, client):
+    _readings(app, [(1000, 1), (1045, 1), (1600, 2), (1645, 2)])
+    assert len(client.get("/api/candidate-moves", headers=AUTH).get_json()["candidates"]) == 1
+    client.post(
+        "/placements",
+        json={"node": "feather-01", "room": "bedroom", "start_ts": 1500},
+        headers=AUTH,
+    )
+    assert client.get("/api/candidate-moves", headers=AUTH).get_json()["candidates"] == []
+
+
+def test_candidate_moves_on_a_fresh_install(client):
+    assert client.get("/api/candidate-moves", headers=AUTH).get_json()["candidates"] == []
+
+
+# -------------------------------------------------------------------- export
+
+
+def test_export_is_csv_with_a_header_and_rooms(app, client):
+    client.post("/ingest", headers=AUTH, json={"node": "feather-01", "co2_ppm": 612})
+    app.buffer.flush()
+    client.post("/placements", json={"node": "feather-01", "room": "office"}, headers=AUTH)
+
+    res = client.get("/api/export", headers=AUTH)
+    assert res.status_code == 200
+    assert res.mimetype == "text/csv"
+    assert "attachment" in res.headers["Content-Disposition"]
+    lines = res.get_data(as_text=True).strip().splitlines()
+    assert lines[0].split(",")[:4] == ["ts", "iso_utc", "room", "bme_temp_c"]
+    assert len(lines) == 2
+    assert "612" in lines[1]
+
+
+def test_export_respects_the_range(app, client):
+    _readings(app, [(1000, 1), (2000, 1), (3000, 1)])
+    body = client.get("/api/export?from=1500&to=2500", headers=AUTH).get_data(as_text=True)
+    rows = body.strip().splitlines()[1:]
+    assert [r.split(",")[0] for r in rows] == ["2000"]
+
+
+def test_export_rejects_a_non_integer_bound(app, client):
+    _readings(app, [(1000, 1)])
+    assert client.get("/api/export?from=yesterday", headers=AUTH).status_code == 400
+
+
+def test_export_on_a_fresh_install_is_empty_not_an_error(client):
+    res = client.get("/api/export", headers=AUTH)
+    assert res.status_code == 200
+    assert res.get_data(as_text=True) == ""
