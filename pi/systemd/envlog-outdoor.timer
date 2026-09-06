@@ -1,0 +1,18 @@
+[Unit]
+Description=Fetch the envlog outdoor reference hourly
+Documentation=https://github.com/danieljurnove-ctrl/env-logger
+
+[Timer]
+# Seven minutes past, not on the hour: the upstream model publishes at the top
+# of the hour, and asking for a value the instant it is due is how you get the
+# previous one.
+OnCalendar=*-*-* *:07:00
+# Spread against every other hourly job on the box.
+RandomizedDelaySec=3m
+# One catch-up run after a reboot or a suspend. The fetch re-requests the last
+# two days anyway, so a missed hour heals on the next successful run -- this
+# just makes it heal sooner.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -97,3 +97,35 @@ CREATE TABLE IF NOT EXISTS markers (
   label TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_markers_ts ON markers(ts);
+
+-- Outdoor conditions, from a public weather/air-quality model. The reference
+-- that turns "my PM2.5 is 40" into "my PM2.5 is 40 and outside is 8, so this is
+-- mine" -- or into "outside is 55, so shut the window". Without it every indoor
+-- number is unanchored, and a wildfire two states away reads as a kitchen
+-- problem.
+--
+-- NOT a measurement of your street. It is a regional model on a grid of several
+-- kilometres, so treat it as the trend outside your neighbourhood, not as a
+-- second sensor. It will disagree with a thermometer on your porch, and the
+-- thermometer is right.
+--
+-- One row per hour, keyed on ts alone: outdoor is outdoor, so unlike readings
+-- this is not per-node. Hours are the top of the hour, unix seconds, UTC.
+--
+-- Written with ON CONFLICT DO UPDATE rather than DO NOTHING, which is the
+-- opposite of readings and deliberate: the upstream model revises recent hours
+-- as observations replace forecasts, so a re-fetch of an hour we already hold
+-- is a correction to take, not a duplicate to drop.
+CREATE TABLE IF NOT EXISTS outdoor (
+  ts           INTEGER PRIMARY KEY,
+  temp_c       REAL,
+  rh_pct       REAL,
+  pressure_hpa REAL,
+  pm2_5_atm    REAL,
+  pm10_atm     REAL,
+  us_aqi       REAL,
+  -- When this row was last written. The gap between fetched_at and ts is how
+  -- you tell a settled observation from a value still being revised, and a
+  -- stale fetched_at across every recent row is how you notice the timer died.
+  fetched_at   INTEGER NOT NULL
+);

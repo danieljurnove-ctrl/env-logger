@@ -65,6 +65,32 @@ SENSOR_RANGES = {
 SENSOR_COLUMNS = tuple(SENSOR_RANGES)
 READING_COLUMNS = ("node_id", "ts") + SENSOR_COLUMNS + ("boot_count",)
 
+# Indoor column -> its counterpart in the `outdoor` table, for the reference
+# line on the charts. Only pairs that mean the same quantity appear here: the
+# point is "is this number mine or the whole region's", and that question is
+# only well posed when both sides measure the same thing.
+#
+# Both temperature sensors map to the one outdoor temperature -- the BME280 and
+# the SCD-41 disagree with each other indoors, which is the whole reason they
+# are stored separately, but outside there is only one air.
+#
+# co2_ppm is deliberately absent. The upstream air-quality model carries carbon
+# *monoxide*, not dioxide, and quietly pairing the two would be a units-grade
+# error dressed up as a feature. The decay fit's 420 ppm stays an assumption.
+# Particle counts are absent for the same reason: the model reports mass
+# concentration, not counts per 0.1 L.
+OUTDOOR_FOR = {
+    "bme_temp_c": "temp_c",
+    "scd_temp_c": "temp_c",
+    "bme_rh_pct": "rh_pct",
+    "scd_rh_pct": "rh_pct",
+    "pressure_hpa": "pressure_hpa",
+    "pm2_5_atm": "pm2_5_atm",
+    "pm10_atm": "pm10_atm",
+}
+OUTDOOR_COLUMNS = ("temp_c", "rh_pct", "pressure_hpa", "pm2_5_atm",
+                   "pm10_atm", "us_aqi")
+
 
 class ValidationError(ValueError):
     """A request body the node should not have sent."""
@@ -424,6 +450,46 @@ def _query_buckets(conn, node_id, metrics, t_from, t_to, bucket):
     """
     params += [node_id, t_from, t_to]
     return conn.execute(sql, params).fetchall()
+
+
+def _query_outdoor(conn, columns, t_from, t_to):
+    """Outdoor rows covering the window, plus the last one before it.
+
+    Deliberately NOT resampled onto the chart's bucket grid. The source is
+    hourly and the charts are bucketed in seconds; interpolating between two
+    hourly values would invent readings that were never modelled and hide how
+    coarse the reference is. The dashboard step-holds each value until the next
+    hour instead, which is what an hourly average actually claims.
+
+    The row at or before t_from is included so the held line reaches the left
+    edge of the chart rather than starting up to an hour in.
+
+    Column names are interpolated, so they MUST already be whitelisted.
+    """
+    select = ", ".join(columns)
+    sql = f"""
+        SELECT ts, {select} FROM outdoor
+        WHERE ts >= COALESCE((SELECT MAX(ts) FROM outdoor WHERE ts <= ?), ?)
+          AND ts < ?
+        ORDER BY ts
+    """
+    rows = conn.execute(sql, (t_from, t_from, t_to)).fetchall()
+    return [[r["ts"]] + [r[c] for c in columns] for r in rows]
+
+
+def _outdoor_columns_for(metrics):
+    """The outdoor columns worth fetching for these indoor metrics, deduped.
+
+    Both temperature sensors map to the single outdoor temperature, so asking
+    for bme_temp_c and scd_temp_c together must not select temp_c twice.
+    """
+    columns, seen = [], set()
+    for metric in metrics:
+        counterpart = OUTDOOR_FOR.get(metric)
+        if counterpart and counterpart not in seen:
+            seen.add(counterpart)
+            columns.append(counterpart)
+    return columns
 
 
 def _fold_into_local_days(rows, metrics, tz):
@@ -1078,7 +1144,7 @@ def create_app(db_path=None, token=None, flush_interval=None, start_flusher=True
             return jsonify(
                 node=None, now=int(time.time()), last_ts=None,
                 seconds_since_last=None, buffered=app.buffer.pending_count(),
-                placement=None,
+                placement=None, outdoor_last_ts=None,
             )
         node_id, node_name = _resolve_node(conn, requested)
         row = conn.execute(
@@ -1093,6 +1159,12 @@ def create_app(db_path=None, token=None, flush_interval=None, start_flusher=True
             (node_id,),
         ).fetchone()
         now = int(time.time())
+        # The outdoor fetcher is a separate timer, so it can die without the
+        # service noticing. Reporting its newest hour here is what turns that
+        # from "the reference line just stopped one day" into something the
+        # header can say out loud.
+        outdoor_row = conn.execute("SELECT MAX(ts) AS last_ts FROM outdoor").fetchone()
+        outdoor_last = outdoor_row["last_ts"] if outdoor_row else None
         return jsonify(
             node=node_name,
             now=now,
@@ -1100,6 +1172,7 @@ def create_app(db_path=None, token=None, flush_interval=None, start_flusher=True
             seconds_since_last=(None if last_ts is None else now - int(last_ts)),
             buffered=app.buffer.pending_count(),
             placement=(dict(where) if where else None),
+            outdoor_last_ts=outdoor_last,
         )
 
     @app.get("/api/series")
@@ -1159,6 +1232,22 @@ def create_app(db_path=None, token=None, flush_interval=None, start_flusher=True
                 for r in rows
             ]
 
+        # The outdoor reference rides along rather than living at its own
+        # endpoint: every caller that wants indoor PM2.5 for a window wants
+        # outdoor PM2.5 for the same window, and a second round trip could
+        # return a different one.
+        outdoor_columns = _outdoor_columns_for(metrics)
+        outdoor = None
+        if outdoor_columns:
+            outdoor = {
+                "columns": ["ts"] + outdoor_columns,
+                # The indoor -> outdoor pairing travels with the data so the
+                # dashboard does not carry a second copy of the map that then
+                # drifts from this one.
+                "pairs": {m: OUTDOOR_FOR[m] for m in metrics if m in OUTDOOR_FOR},
+                "rows": _query_outdoor(conn, outdoor_columns, t_from, t_to),
+            }
+
         return jsonify(
             node=node_name,
             tz=tz_name,
@@ -1167,6 +1256,10 @@ def create_app(db_path=None, token=None, flush_interval=None, start_flusher=True
             to=t_to,
             columns=["ts"] + metrics,
             segments=_segment(entries, metrics),
+            # null, not {}, when no requested metric has a counterpart -- the
+            # dashboard distinguishes "nothing to compare against" from
+            # "comparable, but the table is empty because the timer is off".
+            outdoor=outdoor,
         )
 
     @app.get("/rooms")

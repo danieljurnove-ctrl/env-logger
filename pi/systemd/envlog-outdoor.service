@@ -1,0 +1,23 @@
+[Unit]
+Description=envlog outdoor reference fetch
+Documentation=https://github.com/danieljurnove-ctrl/env-logger
+# The only unit here that needs the internet. A run before the link is up
+# fails, logs one line, and the next hour picks it up -- gaps in this table are
+# as tolerable as gaps in readings.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=envlog
+Group=envlog
+EnvironmentFile=-/etc/envlog/envlog.env
+# The venv interpreter, not the system one: on Buster /usr/bin/python3 is 3.7
+# and the installer may well have built this venv on a newer altinstall.
+ExecStart=/opt/envlog/.venv/bin/python /opt/envlog/fetch_outdoor.py
+# The database is the only thing it writes.
+ReadWritePaths=/var/lib/envlog
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
