@@ -186,18 +186,23 @@ house than the answer needs.
 The timer is installed and enabled by `install.sh` whether or not coordinates are set — with
 none, the fetch exits 0 and says it is disabled, so enabling it later needs no reinstall.
 
-**Check the upstream contract by hand the first time.** The variable names could not be verified
-where this was written, because that environment has no route to `open-meteo.com`:
+**The upstream contract was checked on 2026-09-06** — 72 hours, all six columns populated — so
+the variable names are known good, not merely documented. Re-run the same check any time a column
+starts coming back empty, or after changing coordinates:
 
 ```sh
-sudo -u envlog ENVLOG_LAT=40.71 ENVLOG_LON=-74.01 \
+sudo -u envlog ENVLOG_LAT=37.85 ENVLOG_LON=-122.27 \
   /opt/envlog/.venv/bin/python /opt/envlog/fetch_outdoor.py --dry-run
 ```
 
-Every column should carry a number. A column of `None` across every hour means that variable's
-name is wrong upstream — fix it in `WEATHER_VARS` or `AIR_QUALITY_VARS`. The fetcher deliberately
-treats an unknown name as an empty column rather than an error, so the failure is a blank line on
-a chart and not an hourly unit going red.
+It writes nothing. Every column should carry a number; a column of `None` across every hour means
+that name has changed upstream — fix it in `WEATHER_VARS` or `AIR_QUALITY_VARS`. The fetcher
+treats an unknown name as an empty column rather than an error, so that failure is a blank line
+on a chart and not an hourly unit going red every hour forever.
+
+**`us_aqi` will not track the PM columns, and that is correct.** US AQI is the maximum across
+pollutants, not PM2.5's own sub-index, so an AQI in the 40s alongside a PM2.5 of 4 µg/m³ is
+ozone doing the driving.
 
 **It is a model, not a sensor.** Open-Meteo serves a numerical forecast on a grid of several
 kilometres. It is the trend over your neighbourhood, and when it disagrees with a thermometer
