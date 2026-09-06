@@ -1,8 +1,11 @@
 -- envlog schema.
 --
--- Target SQLite 3.40, the version Raspberry Pi OS Bookworm ships. A development
--- sandbox may have something much newer: do not reach for STRICT tables or recent
--- JSON functions that pass locally and fail on the Pi.
+-- Target SQLite 3.27.2, the version the deployed box (Raspbian Buster) ships -- not
+-- the 3.40 of Bookworm this was first written against. A development sandbox will
+-- have something much newer, so the ceiling is easy to breach by accident: no
+-- STRICT tables (3.37), no RETURNING (3.35), no ->> (3.38), no unixepoch() (3.38),
+-- no generated columns (3.31). VACUUM INTO, which the backup needs, is 3.27.0 --
+-- one patch release below what is installed. See docs/deployment.md.
 --
 -- Pragmas are split two ways on purpose. journal_mode is a persistent property of
 -- the database file and belongs here. synchronous, busy_timeout and foreign_keys
@@ -61,6 +64,17 @@ CREATE TABLE IF NOT EXISTS readings (
   pm1_0_atm    REAL,
   pm2_5_atm    REAL,
   pm10_atm     REAL,
+  -- Particle counts per 0.1 L, cumulative: every particle counted at 0.5um is
+  -- also counted at 0.3um. Stored alongside mass because mass is derived from
+  -- these and reported as an integer, so a clean room reads 0.0 ug/m3 on all
+  -- three sizes for hours while the counts move over hundreds. The counts are
+  -- what answer "is this room dustier than that one" indoors.
+  pm0_3_count  REAL,
+  pm0_5_count  REAL,
+  pm1_0_count  REAL,
+  pm2_5_count  REAL,
+  pm5_0_count  REAL,
+  pm10_count   REAL,
   boot_count   INTEGER,
   PRIMARY KEY (node_id, ts)
 );

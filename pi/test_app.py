@@ -138,6 +138,68 @@ def test_pm_ordering_violation_drops_all_three(app, client):
     assert row["co2_ppm"] == 600
 
 
+def test_counts_are_stored_alongside_mass(app, client):
+    """The counts are the point: mass rounds to 0 indoors while these move."""
+    client.post(
+        "/ingest",
+        headers=AUTH,
+        json={
+            "node": "feather-01",
+            "pm1_0_atm": 0.0, "pm2_5_atm": 0.0, "pm10_atm": 0.0,
+            "pm0_3_count": 126.0, "pm0_5_count": 112.0, "pm1_0_count": 24.0,
+            "pm2_5_count": 2.0, "pm5_0_count": 0.0, "pm10_count": 0.0,
+        },
+    )
+    app.buffer.flush()
+    row = rows(app)[0]
+    assert row["pm2_5_atm"] == 0.0
+    assert row["pm0_3_count"] == 126.0
+    assert row["pm2_5_count"] == 2.0
+
+
+def test_count_ordering_violation_drops_all_six(app, client):
+    """Counts are cumulative, so they can only decrease with size.
+
+    0.5um reading higher than 0.3um is physically impossible -- every particle
+    counted at 0.5um was already counted at 0.3um -- so the frame is untrusted
+    and the whole set goes, exactly as the mass triple does.
+    """
+    client.post(
+        "/ingest",
+        headers=AUTH,
+        json={
+            "node": "feather-01",
+            "pm0_3_count": 10.0, "pm0_5_count": 99.0, "pm1_0_count": 5.0,
+            "pm2_5_count": 2.0, "pm5_0_count": 1.0, "pm10_count": 0.0,
+            "co2_ppm": 600.0,
+        },
+    )
+    app.buffer.flush()
+    row = rows(app)[0]
+    for column in ("pm0_3_count", "pm0_5_count", "pm1_0_count",
+                   "pm2_5_count", "pm5_0_count", "pm10_count"):
+        assert row[column] is None, column
+    # The rest of the reading survives: one bad sensor never drops the row.
+    assert row["co2_ppm"] == 600.0
+
+
+def test_equal_counts_are_valid(app, client):
+    """Non-increasing, not strictly decreasing -- clean air reads 0, 0, 0."""
+    client.post(
+        "/ingest",
+        headers=AUTH,
+        json={
+            "node": "feather-01",
+            "pm0_3_count": 5.0, "pm0_5_count": 5.0, "pm1_0_count": 0.0,
+            "pm2_5_count": 0.0, "pm5_0_count": 0.0, "pm10_count": 0.0,
+        },
+    )
+    app.buffer.flush()
+    row = rows(app)[0]
+    assert row["pm0_3_count"] == 5.0
+    assert row["pm10_count"] == 0.0
+
+
 def test_unknown_field_is_rejected(client):
     resp = client.post(
         "/ingest", headers=AUTH, json={"node": "feather-01", "co2_ppmm": 600}

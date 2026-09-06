@@ -4,6 +4,28 @@ Decisions and the reasoning behind them, so the code phases are execution rather
 
 ---
 
+## Purpose
+
+**Short-term comparison between rooms in one house.** Is the bedroom stuffier than the office by
+bedtime; does the kitchen recover after cooking; is this room worse than that one this week.
+
+It is not a long-term archive. That distinction is load-bearing in more places than it looks:
+
+- **Backups are not configured**, and that is a decision rather than an omission. Losing a few
+  weeks of stale room comparisons costs nothing worth defending against.
+- **Retention needs no thought.** Full resolution forever is simplest and the data is small; it
+  just isn't a feature anyone is relying on.
+- **Absolute CO₂ accuracy barely matters.** The SCD-41's self-calibration may never converge on a
+  node that gets unplugged for every room move (see
+  [hardware.md](hardware.md#scd-41)) — and for every question above, the relative trend is the
+  answer. This turns the project's most uncertain hardware question into a non-issue.
+
+What *does* matter, given that purpose: correct room attribution (a trend drawn across a move is
+a lie), honest gaps rather than fabricated continuity, and a dashboard that segments by placement.
+All three are what the rest of this document is about.
+
+---
+
 ## Why not Grafana
 
 The original sketch had Grafana on port 3000 with the SQLite datasource plugin. It's out, for
@@ -12,6 +34,12 @@ one disqualifying reason and one supporting one:
 - **RAM.** Grafana's RSS runs 150–280 MB. The Pi 2B has 1 GB total and already runs Pi-hole,
   whose own footprint scales with blocklist size. There isn't room, and the failure mode is the
   whole box thrashing rather than one service degrading.
+
+  **This premise turned out to be wrong.** The box this was deployed on is a 4 GB Pi 4, where
+  Grafana would fit comfortably. The decision stands on the packaging argument below and on the
+  placement-aware dashboard being worth owning — but this bullet is no longer a reason, and
+  should not be recycled as one for rejecting anything else. See
+  [deployment.md](deployment.md#what-the-ram-figure-changes).
 - **ARMv7 packaging.** Grafana still builds 32-bit ARM packages but removed them from the
   download page in ~March 2024, so installing means constructing URLs by hand
   ([grafana#92385](https://github.com/grafana/grafana/issues/92385)). Workable, but it will rot.
@@ -37,9 +65,21 @@ may well serve prebuilt ARM wheels. The workload argument is the durable one.
 Raspberry Pi OS Bookworm marks its system Python externally managed (PEP 668), so a venv is
 required. Do not reach for `--break-system-packages` on a service meant to run for years.
 
-**Target SQLite 3.40**, the version Bookworm ships. A development sandbox may have something much
-newer — don't reach for `STRICT` tables or recent JSON functions that pass locally and fail on
-the Pi.
+**The venv also has to be built on a Python new enough to run this.** `app.py` imports `zoneinfo`
+and the pinned Flask and waitress all require **3.9+**; an older Raspberry Pi OS ships 3.7, where
+the install succeeds and the service then dies at import. `install.sh` checks this up front and
+takes `ENVLOG_PYTHON` to point at a newer interpreter — which is how the deployed box runs, on a
+3.11 built alongside its system 3.7. See [deployment.md](deployment.md#python-311-built-alongside-system-37-untouched).
+
+**Target SQLite 3.27.2**, the version the deployed box ships — not the 3.40 of Bookworm this was
+originally written against. A development sandbox will have something much newer, so the ceiling
+is easy to breach by accident: no `STRICT` tables (3.37), no `RETURNING` (3.35), no `->>` (3.38),
+no `unixepoch()` (3.38), no generated columns (3.31).
+
+`VACUUM INTO`, which the nightly backup depends on, arrived in 3.27.0 — one patch release below
+what is installed. Everything currently in use is comfortably older than that: `ON CONFLICT DO
+NOTHING` is 3.24 and there are no window functions. See
+[deployment.md](deployment.md#sqlite-is-3272-and-that-is-the-real-ceiling).
 
 ---
 
@@ -78,10 +118,23 @@ CREATE TABLE readings (
   pm1_0_atm    REAL,
   pm2_5_atm    REAL,
   pm10_atm     REAL,
+  pm0_3_count  REAL,                 -- particles per 0.1 L, cumulative by size
+  pm0_5_count  REAL,
+  pm1_0_count  REAL,
+  pm2_5_count  REAL,
+  pm5_0_count  REAL,
+  pm10_count   REAL,
   boot_count   INTEGER,              -- move detection only
   PRIMARY KEY (node_id, ts)
 );
 ```
+
+**Particle counts are stored as well as mass**, all six channels the sensor reports. Mass is
+derived from these and rounded to an integer, so indoors it reads 0 µg/m³ for hours while the
+counts move over hundreds — the counts are what distinguish one room from another at household
+concentrations. The CF=1 "standard particle" mass set is deliberately not stored: it is the same
+measurement under a different calibration curve, identical to the atmospheric set except at
+concentrations this project will never see indoors.
 
 **Both the BME280 and the SCD-41 report temperature and humidity**, so the columns are named per
 sensor. A single `temp_c` column would silently discard one of them — and the SCD-41's own
@@ -99,9 +152,10 @@ forecloses rowid-based tooling for nothing.
 
 ### Size
 
-About 100 bytes per row. At a 45-second cadence that's roughly **70 MB/year**, or ~350 MB over
-five years for one node. Small enough that keeping everything at full resolution forever is the
-simplest correct answer.
+About 100 bytes per row. At a 45-second cadence that's roughly **70 MB/year** for one node. Even
+left running for years unattended it stays small enough that keeping everything at full
+resolution is the simplest correct answer — and against the actual usage in
+[Purpose](#purpose), the question never comes up at all.
 
 ### What we deliberately don't do
 
@@ -109,7 +163,8 @@ An earlier draft specified a 90-day retention window, an hourly rollup table, a 
 populate it, incremental auto-vacuum, and dashboard logic to switch between raw and rolled-up
 data by time range. All of it is gone.
 
-The sizing above is why: 350 MB over five years doesn't need managing. The rollup existed to make
+The sizing above is why: a few hundred MB over several years doesn't need managing. The rollup
+existed to make
 queries fast that were never going to be slow, and it introduced a genuinely dangerous failure
 mode — with raw data deleted at 90 days and the rollup as the only permanent record, a rollup job
 that silently breaks destroys history irrecoverably.
@@ -169,9 +224,14 @@ minute of readings lost on an unclean shutdown.
 
 ## Backups
 
-The stated purpose is multi-year trends. The storage medium is an SD card in a Pi — the most
-failure-prone component in the system, with a wear-out mode that the batching above exists to
-slow down. Accepting gaps in the record is not the same as accepting the loss of all of it.
+**Not configured on this deployment, deliberately** — see [Purpose](#purpose). Backing up a
+rolling few weeks of room comparisons is not worth a scheduled job and somewhere to put it, and
+`ENVLOG_BACKUP_DEST` being unset means `backup.sh` warns and exits 0 rather than pretending.
+
+The machinery below ships anyway, because the moment the archive *is* worth something the SD card
+is the most failure-prone component in the system, and the batching above exists to slow down a
+wear-out mode that still ends in the card dying. Setting one line in `/etc/envlog/backup.conf`
+turns it on; nothing needs reinstalling.
 
 Nightly:
 
@@ -244,6 +304,16 @@ does.
   compared against each other without cross-sensor error.
 - **Flag the first few minutes of a placement as settling** — the BME280 needs to thermalise and
   the PM fan needs to spin up.
+- **An outage breaks the line too.** Readings stop whenever WiFi or Pi-hole does, and those gaps
+  are accepted — but drawing a straight line across one asserts the room did nothing in between,
+  which is the same lie as drawing a slope across a move.
+- **A slow sensor is not an outage.** A bucket exists if *any* metric landed in it, so PM — five
+  minutes against a 45-second cadence — is NULL in most rows. Treating those as gaps isolates
+  every PM sample between two breaks and the series can only ever draw dots. So each chart is
+  first compacted to the rows where its own metrics have data, and only then judged for outages,
+  against the coarser of the bucket and that metric's own observed spacing. The spacing estimate
+  is a lower quartile rather than a mean, because outages only add large deltas and would
+  otherwise inflate the very threshold meant to catch them.
 
 ---
 
@@ -260,7 +330,10 @@ Auth is a shared secret in an `X-Auth-Token` header.
 
 ### Data hygiene
 
-- Enforce `pm1_0 ≤ pm2_5 ≤ pm10`; reject implausible values.
+- Enforce `pm1_0 ≤ pm2_5 ≤ pm10` on mass, and the reverse on counts: they are cumulative
+  "at least this size", so `pm0_3 ≥ pm0_5 ≥ … ≥ pm10`. Either ordering violated means the frame
+  is untrustworthy, so that whole set is dropped — not the row.
+- Reject implausible values.
 - A failed sensor NULLs its own columns — never drop the whole row. If the SCD-41 times out on
   I²C while the BME280 responds, that reading is still worth keeping.
 - Render NULL as a gap, not as a line connected across it.
@@ -272,6 +345,11 @@ Auth is a shared secret in an `X-Auth-Token` header.
 **Liveness.** The dashboard header shows `last seen: N minutes ago`, red past a threshold.
 Roughly ten lines of code, and without it a dead node is discovered whenever you next happen to
 open the page — which for a portable sensor that's often unplugged is a real risk.
+
+**Units.** Store Celsius, display Fahrenheit. The sensors report Celsius, the API returns it, and
+the archive holds it; the dashboard converts when it draws. Keeping the conversion at the display
+edge means changing your mind is a refresh rather than a migration of every historical row — and
+the same argument as the BME280 offset: don't bake a presentation decision into stored data.
 
 **Timezones.** Store UTC. The API takes an explicit IANA timezone and does local-day grouping at
 query time. "Overnight CO₂" and "this week versus last" are local-time questions, and two days a
@@ -291,6 +369,13 @@ size cap is not.
 
 One self-contained HTML page reading `GET /api/series`, in the same spirit as a single-file app:
 no build step, no framework.
+
+**It has to work in portrait on a phone**, because that is where it gets read once Tailscale is
+up — standing in the room you are asking about. The layout constraint that matters: the panels
+live in a CSS grid whose track is `minmax(0, 1fr)`, not the implicit `auto`. An `auto` track takes
+the min-content width of its widest item, so one unshrinkable child (the placement table, with its
+date inputs) widens every panel and pushes the page past the viewport — and the charts, which size
+themselves from their container, then grow to match and overflow visibly.
 
 Vendor [uPlot](https://github.com/leeoniya/uPlot) (~40 KB, built for exactly this shape of data)
 rather than hand-rolling canvas or pulling a CDN dependency onto a box that may have no route to

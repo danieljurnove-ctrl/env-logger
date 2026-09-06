@@ -106,7 +106,19 @@ better to find out now than with a box of sensors on the desk.
 
 ## Step 1 — Pi: ingest service
 
-Install per [pi/README.md](../pi/README.md) — the short version:
+Three things to check on the Pi before installing, each of which has already cost an evening once
+(details in [deployment.md](deployment.md)):
+
+- **`python3 --version` must be 3.9 or newer.** `app.py` imports `zoneinfo`, and the pinned Flask
+  and waitress need 3.9+. If it is older, build a newer interpreter with `make altinstall` —
+  never `make install`, which shadows the system `python3` that Pi-hole uses — and install with
+  `sudo ENVLOG_PYTHON=python3.11 bash pi/install.sh`.
+- **`sudo ss -tlnp | grep :8000` must come back empty.** If something already holds the port,
+  `envlog.service` starts and dies with `Address already in use`. Either free the port or set
+  `ENVLOG_PORT`.
+- **`sqlite3 --version` must be 3.27.0 or newer**, the floor for the `VACUUM INTO` in step 2.
+
+Then install per [pi/README.md](../pi/README.md) — the short version:
 
 ```sh
 sudo mkdir -p /opt/envlog /var/lib/envlog /etc/envlog
@@ -161,21 +173,57 @@ short as possible.
 
 ## Step 3 — Pi-hole: naming
 
-Add a static DHCP reservation for the node's MAC, and a local DNS record pointing `envlog.home`
-at the Pi's LAN IP. Both are in the Pi-hole admin UI; on v6 they live in `/etc/pihole/pihole.toml`
+Add a local DNS record pointing `envlog.home` at the Pi's LAN IP, and **make sure the Pi's own
+address cannot change** — a reservation on whatever serves DHCP, or a static address on the Pi.
+That record is written by hand, so if the Pi's address moves, the name silently points at nothing
+and every POST fails.
+
+**The node's address does not need pinning**, despite what this step used to say. Nothing connects
+*to* the node: it initiates every POST, and OTA and `esphome logs` reach it by mDNS name
+(`feather-01.local`), not by address. A changed lease costs nothing. Pin it only if mDNS is
+unreliable on your machine, in which case `use_address:` in the node config is the more direct
+fix. Both are in the Pi-hole admin UI; on v6 they live in `/etc/pihole/pihole.toml`
 rather than the old `dnsmasq.d` snippets.
 
-**Verify:** from a *different* machine on the LAN, `dig +short envlog.home` returns the Pi's
-address, and `curl http://envlog.home:8000/` responds.
+**If the Pi has more than one address, this is the step where that matters.** The service binds
+`0.0.0.0` and answers on all of them, but the name must point at the address reachable from the
+network the *node* joins — on this deployment, the `192.168.50.0/24` side. Pointing it at the
+other interface resolves fine and then times out on every POST.
+
+**Verify:** from a *different* machine **on the node's network**, `dig +short envlog.home`
+returns the Pi's address on that network, and `curl http://envlog.home:8000/` responds.
+
+An empty `dig` here usually means that subnet's DHCP hands out its own resolver rather than the
+Pi, so Pi-hole never sees the query — common when the network belongs to a separate router. Don't
+debug it: set `ingest_host` in [`../esphome/env-node.yaml`](../esphome/env-node.yaml) to the Pi's
+IP and move on. The static reservation above is what keeps that address from changing.
 
 ---
 
 ## Step 4 — Node: I²C only
 
-Flash over USB-C with a **data** cable. Config at this point should contain the GPIO2 power switch
-and the `i2c:` bus with `scan` on — **and no sensor components at all.**
+Copy `esphome/secrets.yaml.example` to `esphome/secrets.yaml` and fill it in first — the ingest
+token is the one the installer printed in step 1.
 
-**Verify:** the boot log lists **both** `0x62` (SCD-41) and `0x77` (BME280).
+Flash [`esphome/i2c-scan.yaml`](../esphome/i2c-scan.yaml) over USB-C with a **data** cable. It is
+the GPIO2 power switch and the `i2c:` bus with `scan` on, and **no sensor components at all.**
+
+```powershell
+& $HOME\.venvs\esphome\Scripts\esphome.exe run esphome\i2c-scan.yaml
+```
+
+**Verify:** the boot log lists **both** `0x62` (SCD-41) and `0x77` (BME280):
+
+```
+[C][i2c.idf:113]: Results from bus scan:
+[C][i2c.idf:119]: Found device at address 0x62
+[C][i2c.idf:119]: Found device at address 0x77
+```
+
+Those are `[C]` — **CONFIG** level. ESPHome's levels run `ERROR < WARN < INFO < CONFIG < DEBUG`,
+so a `logger: level: INFO` suppresses them entirely and the scan looks like it never ran. Sensor
+readings in step 5 are `[D]`, one level further out again. Keep the logger at `DEBUG` until step 7
+passes.
 
 This is the step that catches the GPIO2 trap, and it's why nothing else is configured yet. If the
 scan finds nothing, the problem is power to the STEMMA QT port, not your sensor configuration —
@@ -185,8 +233,14 @@ see [hardware.md](hardware.md#the-i2c-power-trap).
 
 ## Step 5 — Node: sensors one at a time
 
-Add `bme280_i2c`, check the log. Then add `scd4x`, check the log. Wire the SCD-41's pressure
-compensation to the BME280's pressure sensor.
+Switch to [`esphome/env-node.yaml`](../esphome/env-node.yaml), **cut at the `--- STEP 7` marker**
+— delete the `interval:` block at the end and flash the rest. The PM sensor's components stay in
+the image and stay silent, because nothing is wired to the UART yet; PM absent from the row is
+the designed behaviour, not a fault.
+
+(There is no cut that removes the PM sensor alone: `uart:` is a top-level key and `pmsx003` is a
+list item under `sensor:`, so deleting from the STEP 6 marker down would take the two I²C sensors
+with it.)
 
 **Verify:** after each addition, plausible values in the log — not zeros, not NaN, and a
 temperature within a couple of degrees of what the room actually feels like.
@@ -200,8 +254,10 @@ OTA works from here on; no more cable.
 Last, because it needs the four jumpers and because it's the one that can be mis-wired
 destructively. Double-check **VCC goes to `USB`, not `3V`** before powering on.
 
-Set `update_interval: 5min` — strictly greater than 30 s, or the duty cycling silently doesn't
-happen.
+**No reflash needed** — the PM components are already in the step 5 image, waiting for something
+to appear on the UART. Wire the four jumpers, reboot the node, and it starts publishing.
+`update_interval` is already `5min`: strictly greater than 30 s, or the duty cycling silently
+doesn't happen.
 
 **Verify:** the fan is audible for about 30 seconds, then stops, then restarts about five minutes
 later. Values appear once per cycle, not continuously.
@@ -210,8 +266,11 @@ later. Values appear once per cycle, not continuously.
 
 ## Step 7 — Node: enable posting
 
-Point `http_request` at `http://envlog.home:8000/ingest` with the auth header, posting only fresh
-sensor values.
+Flash `env-node.yaml` entire. The `interval:` block posts to
+`http://envlog.home:8000/ingest` with the auth header, carrying only the sensor groups that
+produced a reading since the last POST — see
+[esphome/README.md](../esphome/README.md#freshness-and-why-has_state-is-not-enough) for why that
+is tracked with globals rather than `has_state()`.
 
 **Verify:** rows accumulate in the database with the expected cadence — temperature and CO₂ every
 ~45 s, PM roughly every 5 minutes with NULLs in between.

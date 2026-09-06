@@ -1,0 +1,65 @@
+# Bring-up step 4: I2C scan, and deliberately nothing else.
+#
+#   & $HOME\.venvs\esphome\Scripts\esphome.exe run esphome\i2c-scan.yaml
+#
+# No sensor components at all -- that is the point. This separates "the STEMMA
+# QT port has power and the bus works" from "the sensors are configured
+# correctly", so a failure has one cause instead of three.
+#
+# Verify: the boot log lists BOTH devices --
+#
+#   [C][i2c.idf:113]: Results from bus scan:
+#   [C][i2c.idf:119]: Found device at address 0x62   (SCD-41)
+#   [C][i2c.idf:119]: Found device at address 0x77   (BME280)
+#
+# Neither one found is almost always GPIO2, not your wiring: the STEMMA QT port
+# runs off a regulator gated by that pin, and under ESPHome's esp-idf framework
+# nothing drives it but the switch below. See docs/hardware.md#the-i2c-power-trap.
+#
+# One found and not the other is a cable in the daisy chain -- the two sensors
+# do not collide (0x62 vs 0x77), so an address clash is not the explanation.
+
+substitutions:
+  node_name: feather-01
+
+esphome:
+  name: ${node_name}
+
+esp32:
+  board: adafruit_feather_esp32_v2
+  framework:
+    type: esp-idf
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+logger:
+  # MUST be at least CONFIG. The scan results are logged with ESP_LOGCONFIG, and
+  # ESPHome's levels run ERROR < WARN < INFO < CONFIG < DEBUG -- so `level: INFO`
+  # is not "less chatty", it silently suppresses the entire reason this config
+  # exists. The bus is scanned either way; you just never see the answer.
+  level: DEBUG
+
+api:
+  # 0s or the node reboots every 15 minutes waiting for a Home Assistant that
+  # does not exist. Same reasoning as env-node.yaml.
+  reboot_timeout: 0s
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+switch:
+  - platform: gpio
+    id: i2c_power
+    pin: GPIO2
+    restore_mode: ALWAYS_ON
+    setup_priority: 1200   # POWER, above BUS (1000)
+    internal: true
+
+i2c:
+  id: bus_a
+  sda: GPIO22
+  scl: GPIO20
+  scan: true

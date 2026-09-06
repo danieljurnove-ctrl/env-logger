@@ -27,6 +27,25 @@ The short way, from a checkout on the Pi:
 sudo bash pi/install.sh
 ```
 
+**Python 3.9 or newer is required** — `app.py` imports `zoneinfo`, and the pinned Flask and
+waitress both require 3.9+. Bookworm's system Python (3.11) is fine. An older Raspberry Pi OS is
+not: Buster ships 3.7, where the service dies at import. If the system `python3` is too old,
+build a newer one alongside with `make altinstall` (which does *not* replace `python3`, so
+Pi-hole and anything else on the box keep the interpreter they expect) and point the installer at
+it:
+
+```sh
+sudo ENVLOG_PYTHON=python3.11 bash pi/install.sh
+```
+
+**Only the first time.** After that the venv exists and the installer reuses the interpreter it
+was built on, so updating is a plain `git pull && sudo bash pi/install.sh` with nothing to
+remember. `ENVLOG_PYTHON` still overrides when set, which is how you'd move to a newer
+interpreter later.
+
+`install.sh` checks the version up front and refuses rather than leaving you with a venv that
+fails at first start.
+
 It is safe to re-run — it never overwrites an existing token and never touches the database. It
 prints the token and the dashboard URL when it finishes.
 
@@ -64,6 +83,7 @@ sudo systemctl enable --now envlog.service envlog-backup.timer
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
+| `ENVLOG_PYTHON` | `python3` | Interpreter the venv is built on. **Needs 3.9+** — see below. |
 | `ENVLOG_TOKEN` | *(required)* | Shared secret. The service refuses to start without it. |
 | `ENVLOG_DB` | `/var/lib/envlog/envlog.db` | Database path |
 | `ENVLOG_BIND` / `ENVLOG_PORT` | `0.0.0.0` / `8000` | Listen address |
@@ -139,5 +159,9 @@ has to cope with.
 ## Tests
 
 ```sh
-python -m pytest pi/test_app.py -q
+python -m pytest pi -q
 ```
+
+`test_dashboard.py` runs the dashboard's gap-detection JavaScript through `node`, and skips
+cleanly when node is absent — so a Pi without it still runs everything else. Don't name a single
+test file on the command line; that is how a test stops being run without anyone noticing.

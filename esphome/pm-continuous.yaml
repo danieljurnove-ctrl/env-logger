@@ -1,0 +1,26 @@
+# Diagnostic only. Runs the PM sensor continuously instead of duty-cycled.
+#
+#   & $HOME\.venvs\esphome\Scripts\esphome.exe run esphome\pm-continuous.yaml --device COM3
+#
+# Everything else -- sensors, WiFi, posting -- comes from env-node.yaml, so this
+# cannot drift from the real config. The single difference is update_interval,
+# which at 0s means active mode: the fan never stops and the sensor streams a
+# frame about once a second, so the log reacts to smoke immediately rather than
+# once per five minutes.
+#
+# Use it to answer one question: does PM2.5 move when you give it something to
+# see? Light a match near the intake and blow it out. Numbers into the tens or
+# hundreds mean the sensor works and your air is simply clean. Flat zeros
+# through visible smoke mean the optical path is blocked or the laser is dead --
+# the fan tells you nothing about either.
+#
+# FLASH env-node.yaml BACK WHEN YOU ARE DONE. Continuous running burns the
+# laser's rated 6000-8000 hours in under a year; duty-cycled it lasts about two
+# and a half. An hour of diagnosis costs nothing, a month of forgetting does.
+
+packages:
+  node: !include env-node.yaml
+
+sensor:
+  - id: !extend pms
+    update_interval: 0s

@@ -4,9 +4,15 @@ Home air quality and environmental logging. A portable WiFi sensor node carried 
 room posts readings to an always-on Raspberry Pi, which stores them in SQLite and serves trend
 graphs viewable from anywhere over Tailscale.
 
-> **Status: parts ordered 2026-08-30, not yet arrived.** This repo currently contains
-> documentation and structure only. No application code has been written. See
-> [docs/bring-up.md](docs/bring-up.md) for what happens when the box shows up.
+**The goal is short-term comparison between rooms** — is the bedroom stuffier than the office by
+bedtime, does the kitchen recover after cooking — not a long-term archive. That is why there are
+no backups configured, why absolute CO₂ accuracy matters less than the relative trend, and why
+correct room attribution matters more than either. See
+[docs/design.md](docs/design.md#purpose).
+
+> **Status: hardware in hand, bring-up in progress.** The Pi service and the node firmware are
+> both written and pass their checks off-hardware; nothing has been verified against real sensors
+> yet. [docs/bring-up.md](docs/bring-up.md) is the ordered checklist for doing that.
 
 ---
 
@@ -18,7 +24,7 @@ graphs viewable from anywhere over Tailscale.
      │  only sensors with a fresh reading; the rest are omitted → NULL
      │  target: http://envlog.home:8000/ingest
      ▼
-[ Raspberry Pi 2B — fixed, wired Ethernet, 1 GB ]
+[ Raspberry Pi — fixed, always on, running Pi-hole ]
      ├─ Pi-hole            :53 + its own web UI     (pre-existing, untouched)
      ├─ envlog ingest      :8000  Flask + waitress
      │     ├─ POST  /ingest          auth → validate → buffer → batched write
@@ -31,12 +37,18 @@ graphs viewable from anywhere over Tailscale.
      └─ Tailscale          remote access via the Pi's tailnet IP
 ```
 
-No Grafana. A 1 GB Pi 2B already running Pi-hole has no room for another 150–280 MB of RSS, so
-the ingest service serves its own dashboard page instead.
+No Grafana. The ingest service serves its own dashboard page instead — one less service, no
+plugin architecture to rot, and a dashboard that can be built around placement-aware
+segmentation. (The original reason was RAM on a 1 GB Pi 2B. The box this actually runs on has
+4 GB, so that particular argument no longer applies; the others still do. See
+[docs/deployment.md](docs/deployment.md#what-the-ram-figure-changes).)
 
-**Firmware is built on a laptop, not on the Pi.** ESPHome requires Python ≥3.12 (Raspberry Pi OS
-Bookworm ships 3.11), publishes no armv7 container image, and needs more RAM than a Pi 2B has.
-The Pi is a data sink only.
+**Firmware is built on a laptop, not on the Pi.** ESPHome requires Python ≥3.12, publishes no
+armv7 container image, and wants more RAM than is comfortable here. The Pi is a data sink only.
+
+**The deployed box is not the one described above.** It is a Pi 4 on Raspbian Buster that also
+runs RetroPie, with Python 3.7 as its system interpreter and SQLite 3.27.2. What that changes —
+and what had to be done to it — is in **[docs/deployment.md](docs/deployment.md)**.
 
 Development is on **Windows**, with files reaching the ESP32 over USB and the Pi over SSH. See
 [the development machine notes](docs/bring-up.md#development-machine) for the line-ending and
@@ -74,7 +86,8 @@ hardware doc:
 | `docs/hardware.md` | Bill of materials, pinouts, wiring, sensor gotchas |
 | `docs/design.md` | Schema, storage decisions, API contract, and why |
 | `docs/bring-up.md` | Ordered checklist for the day the parts arrive |
-| `esphome/` | Node firmware config (not yet written) |
+| `docs/deployment.md` | The box this actually runs on, and how it differs from the docs |
+| `esphome/` | Node firmware config — `env-node.yaml`, plus a scan-only config for step 4 |
 | `pi/` | Ingest service, schema, dashboard, systemd units |
 
 ---
@@ -82,7 +95,11 @@ hardware doc:
 ## What it records
 
 Temperature, relative humidity, and barometric pressure (BME280); CO₂, plus a second
-independent temperature and humidity (SCD-41); PM1.0, PM2.5 and PM10 (PMS5003).
+independent temperature and humidity (SCD-41); PM1.0, PM2.5 and PM10 mass, plus particle counts
+at 0.3, 0.5, 1.0, 2.5, 5.0 and 10 µm (PMS5003).
+
+The counts matter more than they look. Mass is derived from them and reported as an integer, so a
+clean room reads 0 µg/m³ on every size for hours while the counts move over hundreds.
 
 Because the node is portable, **location is tracked as a time interval, not as a property of the
 node**. The node identifies the device (`feather-01`); a `placements` table records which room
@@ -104,7 +121,9 @@ Ordered by risk, not by ease.
    fake-node simulator. See [pi/README.md](pi/README.md).
 4. ~~Dashboard~~ — move control, liveness indicator, per-placement series segmentation
    *(built out of order: it needed no hardware either, and the simulator gave it real data)*
-5. **ESPHome node config** ← you are here — flashed and verified sensor-by-sensor on arrival
+5. ~~ESPHome node config~~ — GPIO2 power switch, three sensors, freshness-gated POST. Validates
+   and compiles; see [esphome/README.md](esphome/README.md). **Not yet verified against real
+   sensors** — that is bring-up steps 4–7, and it is where you are now.
 6. Tailscale — independent of everything above
 
 ---
@@ -126,7 +145,14 @@ Stated up front, because most of these are deliberate.
   against ~45 seconds for the other metrics.
 - **Absolute CO₂ may not be trustworthy on a portable node.** The SCD-41's automatic
   self-calibration needs days of continuous running, and every room move power-cycles it. See
-  the hardware doc; relative trends are fine regardless.
+  the hardware doc. Relative trends are unaffected, which is what the questions above actually
+  need — so this is a caveat rather than a problem here.
+- **No backups.** Deliberate: see [Purpose](docs/design.md#purpose). The nightly job ships and
+  is one config line away if that ever changes.
 - **Pi-hole is a dependency for ingest.** The node resolves `envlog.home` through it, so a
-  Pi-hole outage stops data collection. A static-IP fallback in the node config mitigates this.
+  Pi-hole outage stops data collection. Setting `ingest_host` to the Pi's IP in the node config
+  removes the dependency entirely, at the cost of having to edit it if that address changes.
+- **The Pi runs an unsupported OS.** Raspbian Buster stopped getting security updates in 2024,
+  and its package archive has already moved once. Bounded — the service is LAN-only behind a
+  shared token — but see [docs/deployment.md](docs/deployment.md#if-this-box-is-ever-re-imaged).
 - **Single node.** The schema supports several, but nothing has been tested with more than one.
