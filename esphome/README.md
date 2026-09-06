@@ -139,9 +139,14 @@ The POST is skipped entirely when nothing is fresh and when WiFi is down.
 every component, pin, key and option in them is schema-valid, and that is how the GPIO7/8
 flash-pin rejection above was found rather than discovered on arrival day.
 
-**A full `esphome compile` of `env-node.yaml` passes** — run on the Windows laptop 2026-09-04.
-That is what type-checks the C++ in the POST lambda, so the freshness globals, the `std::isnan`
-guards and the JSON building are known to compile, not merely known to be schema-valid.
+**A full `esphome compile` of `env-node.yaml` passes** — run on the Windows laptop, first on
+2026-09-04 and again on 2026-09-06 with the button block above. That is what type-checks the C++
+in both lambdas, so the freshness globals, the `std::isnan` guards, the JSON building and the
+button's marker POST are known to compile, not merely known to be schema-valid.
+
+The compile has to happen on the laptop and not in an agent session: fetching the ESP-IDF
+toolchain needs egress that a sandboxed session does not have, so *schema-valid* is the most any
+change to this file can claim until someone runs the command below.
 
 Re-run it after editing the lambda; the toolchain stays warm, so it is a couple of minutes rather
 than twenty:
