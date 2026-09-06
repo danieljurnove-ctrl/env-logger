@@ -100,7 +100,12 @@ install -m 0644 "$SRC/systemd/envlog.service" \
                 "$SRC/systemd/envlog-backup.service" \
                 "$SRC/systemd/envlog-backup.timer" /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable --now envlog.service envlog-backup.timer
+systemctl enable envlog.service envlog-backup.timer
+# restart, not `enable --now`: --now starts a stopped unit but leaves a running
+# one alone, so on an upgrade the new app.py would sit on disk while the old
+# code kept serving from memory -- and the check below would call that success.
+systemctl restart envlog.service
+systemctl start envlog-backup.timer
 
 sleep 2
 if systemctl is-active --quiet envlog.service; then
