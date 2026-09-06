@@ -89,6 +89,10 @@
   <h1>envlog</h1>
   <span class="liveness" id="liveness">…</span>
   <span class="where" id="where"></span>
+  <!-- Empty unless the outdoor fetcher has fallen behind. A separate timer can
+       die without the service noticing, and the charts would just quietly stop
+       having a reference line. -->
+  <span class="liveness stale" id="outdoorStale" hidden></span>
   <span class="spacer"></span>
   <span class="ranges row" id="ranges"></span>
 </header>
@@ -207,6 +211,20 @@ let range = RANGES[1];
 const SETTLING_SECONDS = 600;  // BME280 thermalising, PM fan spinning up
 const STALE_AFTER = 180;       // ~4 missed 45s samples
 const BAND_COLOURS = ["#4c8dff","#4ade80","#fbbf24","#f472b6","#22d3ee","#a78bfa"];
+
+/* The outdoor reference. Names are per outdoor column rather than per indoor
+   metric, because the temperature chart draws two indoor sensors against one
+   outside -- there is only one air out there. */
+const OUTDOOR_LABELS = {
+  temp_c: "outside", rh_pct: "outside", pressure_hpa: "outside",
+  pm2_5_atm: "PM2.5 outside", pm10_atm: "PM10 outside",
+};
+/* Hourly values are step-held, but only for so long. Past this the fetcher has
+   stopped and the honest picture is the line ending, not a flat extrapolation
+   that looks like calm weather. Two hours: one full gap tolerated, no more. */
+const OUTDOOR_MAX_HOLD = 2 * 3600;
+/* Warn in the header past three hours -- two missed hourly runs. */
+const OUTDOOR_STALE_AFTER = 3 * 3600;
 // Deliberately outside BAND_COLOURS: a marker must not read as a placement.
 const MARKER_COLOUR = "#e879f9";
 
@@ -393,7 +411,47 @@ function markerClicks(u) {
   });
 }
 
-function makeChart(el, labels, colours, data) {
+/* Project the hourly outdoor column onto this chart's x values.
+
+   Step-held, not interpolated: an hourly figure is a claim about that hour,
+   and drawing a slope between two of them would invent readings nobody
+   modelled. Held for OUTDOOR_MAX_HOLD at most, so a dead fetcher shows up as
+   the line stopping rather than as a flat line that reads like real weather.
+
+   `rows` is ordered by ts and `xs` ascends, so the cursor only ever moves
+   forward -- one pass, not a scan per point. */
+function outdoorColumn(outdoor, column, xs, transform) {
+  const idx = outdoor.columns.indexOf(column);
+  const rows = outdoor.rows;
+  if (idx < 0 || !rows.length) return xs.map(() => null);
+  const out = new Array(xs.length).fill(null);
+  let j = 0;
+  for (let i = 0; i < xs.length; i++) {
+    while (j + 1 < rows.length && rows[j+1][0] <= xs[i]) j++;
+    if (rows[j][0] > xs[i]) continue;              // before the first hour
+    let v = rows[j][idx];
+    if (v == null || xs[i] - rows[j][0] > OUTDOOR_MAX_HOLD) continue;
+    out[i] = transform ? transform(v) : v;
+  }
+  return out;
+}
+
+/* Which outdoor columns this chart should draw, deduped and paired with the
+   colour of the indoor series they belong to. */
+function outdoorFor(labels, outdoor) {
+  const picked = [];
+  if (!outdoor || !outdoor.rows || !outdoor.rows.length) return picked;
+  const seen = new Set();
+  labels.forEach((l, i) => {
+    const column = outdoor.pairs[l.metric];
+    if (!column || seen.has(column)) return;
+    seen.add(column);
+    picked.push({ column, label: OUTDOOR_LABELS[column] || "outside", at: i });
+  });
+  return picked;
+}
+
+function makeChart(el, labels, colours, data, dashed) {
   const opts = {
     width: el.clientWidth || 800,
     height: 200,
@@ -408,7 +466,12 @@ function makeChart(el, labels, colours, data) {
     series: [
       {},
       ...labels.map((label, i) => ({
-        label, stroke: colours[i], width: 1.6,
+        label, stroke: colours[i],
+        // Outdoor lines are dashed and thinner in the same hue as the indoor
+        // series they answer, so the pairing reads without a legend lookup
+        // and neither line is mistaken for the other.
+        width: (dashed && dashed[i]) ? 1.1 : 1.6,
+        dash: (dashed && dashed[i]) ? [5, 4] : undefined,
         spanGaps: false,          // a NULL is a gap, never a connected line
         value: (u, v) => v == null ? "–" : v.toFixed(1),
       })),
@@ -437,20 +500,43 @@ function drawChart(key, el, labels, colours, series, transform, resetScales) {
     return;
   }
   chartEls[key] = el;
+
+  /* The outdoor reference, appended after the indoor series so the legend
+     reads indoors-then-outside. `hasAny` above deliberately ignores it: a
+     window with no readings says "No readings in this range" rather than
+     drawing weather over an empty room.
+
+     Same transform as the indoor series -- an outside temperature has to be
+     in Fahrenheit too, or the chart quietly mixes units on one axis. */
+  const outside = outdoorFor(labels, series.outdoor);
+  const allLabels = labels.map(l => l.label);
+  const allColours = colours.slice();
+  const dashed = labels.map(() => false);
+  outside.forEach(o => {
+    data.push(outdoorColumn(series.outdoor, o.column, data[0], transform));
+    allLabels.push(o.label);
+    allColours.push(colours[o.at]);
+    dashed.push(true);
+  });
+
   /* Reuse the instance when it is still the right shape. `setData` with
      resetScales false keeps the current x-scale, which is the whole point:
      the 60-second refresh used to destroy and rebuild every chart, so a
      drag-zoom into last night's curve was thrown away a minute later --
      against a dashboard whose entire purpose is comparing specific stretches
-     of time. Scales are reset only when the range buttons change the window. */
+     of time. Scales are reset only when the range buttons change the window.
+
+     Counted against allLabels, not labels: the first hour of outdoor data
+     changes the series count, and reusing a chart of the old shape would feed
+     setData more columns than it has series. */
   const chart = charts[key];
-  if (chart && chart.series.length === labels.length + 1) {
+  if (chart && chart.series.length === allLabels.length + 1) {
     chart.setData(data, Boolean(resetScales));
     return;
   }
   if (chart) { chart.destroy(); delete charts[key]; }
   el.innerHTML = "";
-  charts[key] = makeChart(el, labels.map(l => l.label), colours, data);
+  charts[key] = makeChart(el, allLabels, allColours, data, dashed);
 }
 
 function drawTimeline(segments, from, to) {
@@ -493,6 +579,15 @@ async function refreshStatus() {
   $("where").textContent = s.placement
     ? `in the ${s.placement.room}${s.placement.note ? ` (${s.placement.note})` : ""}`
     : "location unrecorded";
+
+  /* Null means the outdoor reference was never configured, which is the
+     default and not worth a warning. Only a table that once filled and then
+     stopped is news. */
+  const stale = $("outdoorStale");
+  const outdoorAge = s.outdoor_last_ts == null ? null : s.now - s.outdoor_last_ts;
+  const behind = outdoorAge != null && outdoorAge > OUTDOOR_STALE_AFTER;
+  stale.hidden = !behind;
+  if (behind) stale.textContent = `outdoor ${ago(outdoorAge)}`;
 }
 
 async function refreshSeries(resetScales) {

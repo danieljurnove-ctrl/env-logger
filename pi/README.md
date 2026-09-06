@@ -11,8 +11,10 @@ how to install and run it.
 | `schema.sql` | Table definitions and the persistent pragmas |
 | `requirements.txt` | Pinned `flask` + `waitress` |
 | `backup.sh` | Nightly `VACUUM INTO` + copy off-box |
+| `fetch_outdoor.py` | Hourly outdoor reference from Open-Meteo |
 | `simulate_node.py` | Fake node, for driving the stack without hardware |
 | `test_app.py` | Test suite, including the placement-overlap invariant |
+| `test_outdoor.py` | The outdoor fetcher, against a local stand-in for the API |
 | `install.sh` | Idempotent installer for the Pi |
 | `static/` | The dashboard, plus vendored uPlot |
 | `systemd/` | Service and backup timer units |
@@ -89,6 +91,8 @@ sudo systemctl enable --now envlog.service envlog-backup.timer
 | `ENVLOG_BIND` / `ENVLOG_PORT` | `0.0.0.0` / `8000` | Listen address |
 | `ENVLOG_FLUSH_INTERVAL` | `60` | Seconds between buffer flushes |
 | `ENVLOG_BACKUP_DEST` | *(unset)* | Where snapshots are copied. **Unset means backups never leave the SD card.** |
+| `ENVLOG_LAT` / `ENVLOG_LON` | *(unset)* | Your coordinates. **Unset means no outdoor reference** — see below. |
+| `ENVLOG_OUTDOOR_PAST_DAYS` | `2` | How far back each hourly fetch re-requests, so a missed run heals. |
 
 ---
 
@@ -106,7 +110,7 @@ Every one of them requires `X-Auth-Token`. A tailnet is a flat network.
 | `POST` | `/markers` | `{label, ts?}` — `ts` defaults to now |
 | `PATCH` | `/markers/:id` | Correct the time or the wording |
 | `DELETE` | `/markers/:id` | Returns `204` |
-| `GET` | `/api/status` | Liveness: last reading, seconds since, current room |
+| `GET` | `/api/status` | Liveness: last reading, seconds since, current room, newest outdoor hour |
 | `GET` | `/api/series` | Chart data, segmented by placement |
 | `GET` | `/api/candidate-moves` | Reboots with a gap that no placement explains |
 | `GET` | `/api/export` | Raw rows as CSV, room resolved per reading |
@@ -123,6 +127,11 @@ calendar days in `tz`.
 Its `segments` array holds one entry per placement, so **a move breaks the line** rather than
 drawing a slope between two rooms that never happened. Unlabelled periods come back as
 `"Unknown"` rather than disappearing.
+
+Its `outdoor` key carries the reference series for whichever requested metrics have an outdoor
+counterpart, and is `null` when none do — CO₂ and the particle counts have none. It rides along
+with the readings rather than living at its own endpoint, because a second round trip could
+answer for a different window than the first.
 
 ---
 
@@ -144,8 +153,56 @@ Arming is deliberate rather than a bare click, because uPlot already uses drag-o
 label field autocompletes from every marker you have ever made, so "opened windows" does not
 acquire a second spelling. Misplaced ones are editable and deletable in the history table below.
 
+**The outdoor reference** draws as a dashed line in the same hue as the indoor series it answers,
+on the temperature, humidity, pressure and PM charts. It is step-held between hourly points
+rather than interpolated — an hourly figure is a claim about that hour, and a slope between two
+of them would be invented — and it stops after two hours without new data instead of running on
+flat, so a dead fetcher looks like a dead fetcher. The header says so too, once the newest hour
+is more than three hours old.
+
+CO₂ has no outdoor line: the upstream air-quality model carries carbon *monoxide*, a different
+gas. The decay fit's 420 ppm is still an assumption, not a measurement.
+
 uPlot is vendored in `static/vendor/` rather than loaded from a CDN — the Pi may have no route to
 the internet, and the dashboard has to work when it doesn't.
+
+---
+
+## The outdoor reference
+
+Off by default, because it needs your coordinates and those are not something to guess. To turn
+it on, add them to `/etc/envlog/envlog.env` (root-owned, `0600` — they never belong in the
+repository) and run it once:
+
+```sh
+printf 'ENVLOG_LAT=40.71\nENVLOG_LON=-74.01\n' | sudo tee -a /etc/envlog/envlog.env
+sudo systemctl start envlog-outdoor.service
+```
+
+Two decimals is plenty and is all that gets sent: the fetcher rounds before it asks, the model's
+own grid is kilometres wide, and there is no reason to hand a third party a sharper fix on your
+house than the answer needs.
+
+The timer is installed and enabled by `install.sh` whether or not coordinates are set — with
+none, the fetch exits 0 and says it is disabled, so enabling it later needs no reinstall.
+
+**Check the upstream contract by hand the first time.** The variable names could not be verified
+where this was written, because that environment has no route to `open-meteo.com`:
+
+```sh
+sudo -u envlog ENVLOG_LAT=40.71 ENVLOG_LON=-74.01 \
+  /opt/envlog/.venv/bin/python /opt/envlog/fetch_outdoor.py --dry-run
+```
+
+Every column should carry a number. A column of `None` across every hour means that variable's
+name is wrong upstream — fix it in `WEATHER_VARS` or `AIR_QUALITY_VARS`. The fetcher deliberately
+treats an unknown name as an empty column rather than an error, so the failure is a blank line on
+a chart and not an hourly unit going red.
+
+**It is a model, not a sensor.** Open-Meteo serves a numerical forecast on a grid of several
+kilometres. It is the trend over your neighbourhood, and when it disagrees with a thermometer
+outside your window, the thermometer is right. Its value here is comparative: whether an indoor
+number is yours or the whole region's.
 
 ---
 

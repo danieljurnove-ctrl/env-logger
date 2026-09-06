@@ -781,3 +781,96 @@ def test_decay_rejects_an_unknown_metric(app, client):
     assert client.get(
         "/api/decay?metric=nope&w_from=1&w_to=2", headers=AUTH
     ).status_code == 400
+
+
+# ------------------------------------------------------------------- outdoor
+
+
+def _seed_outdoor(app, hours):
+    """hours: {ts: {column: value}}. Written straight in, as the timer does."""
+    conn = connect(app.config["ENVLOG_DB"])
+    try:
+        with conn:
+            for ts, values in hours.items():
+                conn.execute(
+                    "INSERT INTO outdoor (ts, temp_c, rh_pct, pressure_hpa, "
+                    "pm2_5_atm, pm10_atm, us_aqi, fetched_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        ts,
+                        values.get("temp_c"), values.get("rh_pct"),
+                        values.get("pressure_hpa"), values.get("pm2_5_atm"),
+                        values.get("pm10_atm"), values.get("us_aqi"),
+                        ts,
+                    ),
+                )
+    finally:
+        conn.close()
+
+
+def test_outdoor_is_null_when_nothing_pairs(app, client):
+    """CO2 has no outdoor counterpart -- the upstream carries carbon monoxide,
+    a different gas -- so the answer must be null rather than an empty object.
+    The dashboard tells 'nothing to compare against' from 'comparable, but the
+    fetcher is off'."""
+    _seed(app, client, samples=[(1100, 500)])
+    data = client.get(
+        "/api/series?from=0&to=9999&metrics=co2_ppm", headers=AUTH
+    ).get_json()
+    assert data["outdoor"] is None
+
+
+def test_both_temperature_sensors_share_one_outdoor_column(app, client):
+    """Two sensors indoors, one air outside. Selecting temp_c twice would
+    duplicate the line and, worse, hand uPlot more columns than series."""
+    _seed(app, client, samples=[(1100, 500)])
+    _seed_outdoor(app, {1000: {"temp_c": 9.0}})
+    data = client.get(
+        "/api/series?from=0&to=9999&metrics=bme_temp_c,scd_temp_c", headers=AUTH
+    ).get_json()
+    assert data["outdoor"]["columns"] == ["ts", "temp_c"]
+    assert data["outdoor"]["pairs"] == {
+        "bme_temp_c": "temp_c", "scd_temp_c": "temp_c",
+    }
+
+
+def test_the_hour_before_the_window_is_included(app, client):
+    """Outdoor data is hourly and step-held, so without the row at or before
+    `from` the reference line starts up to an hour into the chart."""
+    _seed(app, client, samples=[(7300, 500)])
+    _seed_outdoor(app, {
+        3600: {"pm2_5_atm": 4.0},   # before the window
+        7200: {"pm2_5_atm": 6.0},   # inside it
+        14400: {"pm2_5_atm": 9.0},  # after it
+    })
+    data = client.get(
+        "/api/series?from=7000&to=10000&metrics=pm2_5_atm", headers=AUTH
+    ).get_json()
+    stamps = [r[0] for r in data["outdoor"]["rows"]]
+    assert stamps == [3600, 7200], "the hour before the window must come too"
+
+
+def test_outdoor_rows_are_empty_when_the_fetcher_never_ran(app, client):
+    """The default state. Comparable metric, no data -- not an error."""
+    _seed(app, client, samples=[(1100, 500)])
+    data = client.get(
+        "/api/series?from=0&to=9999&metrics=pm2_5_atm", headers=AUTH
+    ).get_json()
+    assert data["outdoor"]["rows"] == []
+
+
+def test_status_reports_outdoor_freshness(app, client):
+    """A separate timer can die without the service noticing, and the charts
+    would just quietly stop having a reference line."""
+    _seed(app, client, samples=[(1100, 500)])
+    assert client.get("/api/status", headers=AUTH).get_json()["outdoor_last_ts"] is None
+    _seed_outdoor(app, {3600: {"temp_c": 9.0}, 7200: {"temp_c": 10.0}})
+    assert client.get("/api/status", headers=AUTH).get_json()["outdoor_last_ts"] == 7200
+
+
+def test_status_on_an_empty_database_still_carries_the_key(app, client):
+    """The early return for a Pi with no nodes yet has to grow the same shape,
+    or the dashboard reads undefined on a fresh install."""
+    body = client.get("/api/status", headers=AUTH).get_json()
+    assert body["node"] is None
+    assert "outdoor_last_ts" in body

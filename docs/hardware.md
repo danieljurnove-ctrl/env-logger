@@ -38,6 +38,7 @@ the older board is the single likeliest way to lose an evening.
 | UART TX | GPIO8 |
 | STEMMA QT / NeoPixel power | GPIO2 |
 | User button (SW38) | GPIO38 |
+| NeoPixel data | GPIO0 |
 
 Verified against `espressif/arduino-esp32` → `variants/adafruit_feather_esp32_v2/pins_arduino.h`
 and ESPHome's own `esphome/components/esp32/boards.py`.

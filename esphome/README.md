@@ -4,7 +4,7 @@ Firmware config for the sensor node.
 
 | File | Purpose |
 | --- | --- |
-| `env-node.yaml` | The node — board, I²C/UART buses, three sensors, the button, HTTP POST |
+| `env-node.yaml` | The node — board, I²C/UART buses, three sensors, the button, the status LED, HTTP POST |
 | `i2c-scan.yaml` | Bring-up step 4: I²C scan and nothing else |
 | `minimal.yaml` | Bring-up step 0: does the toolchain compile for this board at all |
 | `secrets.yaml.example` | Template for WiFi credentials, the ingest token, the OTA password |
@@ -105,13 +105,40 @@ that never fires or fires constantly:
   (150 ms–3 s), so brushing the board while carrying it between rooms does not
   litter the charts. A 40 ms `delayed_on` filter debounces on top of that.
 
-**There is no local confirmation that a press registered.** The marker appears on
-the dashboard within a minute, and the log says so over `esphome logs`, but the
-node itself gives no feedback — it has no display. The onboard NeoPixel is the
-obvious fix and is not yet wired up; until it is, a press is an act of faith.
+### The blink
 
-A press with WiFi down is logged and lost, the same trade the readings make:
-there is no queue and no batch endpoint to replay one into.
+**A green flash means the Pi stored it. A longer red flash means it did not.**
+The node has no display, so without this a press is an act of faith — and a
+press that reached the Pi looks exactly like one that came back 401.
+
+The onboard NeoPixel does it, and needs no new hardware: it is on **GPIO0**,
+verified against `espressif/arduino-esp32` →
+`variants/adafruit_feather_esp32_v2/pins_arduino.h` (`PIN_NEOPIXEL 0`), and it
+sits on the same GPIO2-gated 3.3 V rail as the STEMMA QT port
+(`NEOPIXEL_I2C_POWER 2`) that the `i2c_power` switch already turns on, at a
+higher setup priority than the light.
+
+- **The success blink is conditional on the status code, not on the POST
+  returning.** `on_response` checks for 201; anything else logs the code and
+  blinks red, as does `on_error` and as does a press with no WiFi.
+- **Red is longer than green (800 ms against 200 ms)**, so the two are told
+  apart by duration as well as by colour. Red/green is the most common form of
+  colour blindness.
+- **20% brightness.** This is a bright LED at close range and the node may be
+  in a bedroom.
+- **`channel_colors: GRB` is required**, not defaulted from `chipset: WS2812` —
+  omitting it fails validation. On an ESPHome older than this key it is
+  `rgb_order: GRB`, which still works but warns that it goes away in 2027.3.
+- **GPIO0 is a strapping pin**, shared with the BOOT button, and ESPHome warns
+  about it on every compile. Safe for the same reason the GPIO2 warning is:
+  strapping is latched at reset and the pin is only claimed as an output during
+  setup, long after. Adafruit ships the board this way.
+
+Only the button blinks. Readings post every 45 seconds and blinking for those
+would be a light flashing all day in a bedroom.
+
+A press with WiFi down is logged, blinked red, and lost — the same trade the
+readings make: there is no queue and no batch endpoint to replay one into.
 
 ---
 
@@ -135,18 +162,24 @@ The POST is skipped entirely when nothing is fresh and when WiFi is down.
 
 ## Verified so far
 
-**`esphome config` passes on ESPHome 2026.6.5** for both `env-node.yaml` and `i2c-scan.yaml` —
-every component, pin, key and option in them is schema-valid, and that is how the GPIO7/8
-flash-pin rejection above was found rather than discovered on arrival day.
+**`esphome config` passes on ESPHome 2026.8.2** for `env-node.yaml`, with no warnings other than
+the two expected pin ones (GPIO0 and GPIO2 strapping, GPIO7/8 flash-interface). Every component,
+pin, key and option is schema-valid, and this is the check that found the GPIO7/8 flash-pin
+rejection, and later that `rgb_order` was deprecated while `channel_colors` was mandatory —
+neither of which is visible by reading.
 
-**A full `esphome compile` of `env-node.yaml` passes** — run on the Windows laptop, first on
-2026-09-04 and again on 2026-09-06 with the button block above. That is what type-checks the C++
-in both lambdas, so the freshness globals, the `std::isnan` guards, the JSON building and the
-button's marker POST are known to compile, not merely known to be schema-valid.
+**A full `esphome compile` of `env-node.yaml` passed** on the Windows laptop on 2026-09-04, and
+again on 2026-09-06 with the button block. That is what type-checks the C++ in the lambdas, so
+the freshness globals, the `std::isnan` guards, the JSON building and the button's marker POST
+are known to compile rather than merely known to be schema-valid.
 
-The compile has to happen on the laptop and not in an agent session: fetching the ESP-IDF
-toolchain needs egress that a sandboxed session does not have, so *schema-valid* is the most any
-change to this file can claim until someone runs the command below.
+**The status-LED change on top of that has NOT been compiled.** It adds a `light:`, two `script:`
+blocks and a one-expression `on_response` lambda — all schema-valid on 2026.8.2, none of them
+type-checked. Run the command below before flashing.
+
+The compile has to happen on the laptop and not in an agent session. ESPHome fetches the ESP-IDF
+toolchain and its pip constraints from `dl.espressif.com`, which a sandboxed session's egress
+proxy refuses, so *schema-valid* is the ceiling any change made there can claim.
 
 Re-run it after editing the lambda; the toolchain stays warm, so it is a couple of minutes rather
 than twenty:

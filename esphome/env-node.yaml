@@ -145,6 +145,73 @@ switch:
     setup_priority: 1200
     internal: true
 
+# The onboard NeoPixel, and the only feedback this node can give: it has no
+# display. Used solely to confirm a button press was recorded -- readings post
+# every 45s and blinking for those would be a light flashing all day in a
+# bedroom.
+#
+# GPIO0 is verified against espressif/arduino-esp32 ->
+# variants/adafruit_feather_esp32_v2/pins_arduino.h (PIN_NEOPIXEL 0), and the
+# LED sits on the same GPIO2-gated 3.3V rail as the STEMMA QT port
+# (NEOPIXEL_I2C_POWER 2) -- which the switch above already turns on, at a higher
+# setup priority than this component. Nothing extra to wire.
+#
+# GPIO0 is also the boot strapping pin, shared with the BOOT button. That is
+# safe here for the same reason GPIO2 is: strapping is latched at reset, and
+# ESPHome only claims the pin as an output during setup, long after. Adafruit
+# ships the board this way.
+light:
+  - platform: esp32_rmt_led_strip
+    id: status_led
+    internal: true
+    pin: GPIO0
+    num_leds: 1
+    chipset: WS2812
+    # WS2812 wants green first. `channel_colors` is the current spelling and is
+    # REQUIRED -- omitting it fails validation, it is not defaulted from the
+    # chipset. On an ESPHome older than this key it is `rgb_order: GRB`, which
+    # still works but warns that it goes away in 2027.3.
+    channel_colors: GRB
+    # Off after a reboot rather than restoring whatever it was. A light left on
+    # by a crash would otherwise stay on until the next press.
+    restore_mode: ALWAYS_OFF
+    # No fade. These are 200ms status blinks; a default transition would eat
+    # most of one.
+    default_transition_length: 0s
+
+# Two blinks rather than one parameterised script: fewer moving parts in a file
+# that can only be compile-checked on a laptop.
+script:
+  - id: flash_ok
+    # restart, so a second press re-blinks instead of queueing a second blink
+    # behind the first.
+    mode: restart
+    then:
+      - light.turn_on:
+          id: status_led
+          red: 0%
+          green: 100%
+          blue: 0%
+          # 20%: this is a bright LED at close range and the node may be in a
+          # bedroom.
+          brightness: 20%
+      - delay: 200ms
+      - light.turn_off: status_led
+  - id: flash_fail
+    mode: restart
+    then:
+      - light.turn_on:
+          id: status_led
+          red: 100%
+          green: 0%
+          blue: 0%
+          brightness: 20%
+      # Longer than the success blink, so the two are told apart by duration as
+      # well as by colour -- red/green is the most common form of colour
+      # blindness.
+      - delay: 800ms
+      - light.turn_off: status_led
+
 i2c:
   id: bus_a
   # Not the pins of the original ESP32 Feather. Following a tutorial written for
@@ -385,12 +452,31 @@ binary_sensor:
                   # for a LAN round trip and keeps the node off any clock.
                   json: |-
                     root["label"] = "button";
+                  # The blink is the whole point of checking the status rather
+                  # than assuming: a press that reached the Pi and a press that
+                  # got a 401 look identical from the node otherwise, and this
+                  # node has no other way to tell you.
+                  on_response:
+                    then:
+                      - if:
+                          condition:
+                            lambda: return response->status_code == 201;
+                          then:
+                            - script.execute: flash_ok
+                          else:
+                            - logger.log:
+                                level: WARN
+                                format: "marker POST rejected: HTTP %d"
+                                args: ['response->status_code']
+                            - script.execute: flash_fail
                   on_error:
                     then:
                       - logger.log:
                           level: WARN
                           format: "marker POST failed -- press not recorded"
+                      - script.execute: flash_fail
             else:
               - logger.log:
                   level: WARN
                   format: "button pressed with no WiFi -- press not recorded"
+              - script.execute: flash_fail

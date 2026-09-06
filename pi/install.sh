@@ -64,7 +64,7 @@ install -d -m 0755 -o "$SERVICE_USER" -g "$SERVICE_USER" "$DATA_DIR" "$BACKUP_DI
 
 log "copying application files"
 install -m 0644 "$SRC/app.py" "$SRC/schema.sql" "$SRC/requirements.txt" "$PREFIX/"
-install -m 0755 "$SRC/backup.sh" "$PREFIX/"
+install -m 0755 "$SRC/backup.sh" "$SRC/fetch_outdoor.py" "$PREFIX/"
 rm -rf "${PREFIX:?}/static"
 cp -r "$SRC/static" "$PREFIX/static"
 chmod -R a+rX "$PREFIX/static"
@@ -98,14 +98,20 @@ fi
 log "installing systemd units"
 install -m 0644 "$SRC/systemd/envlog.service" \
                 "$SRC/systemd/envlog-backup.service" \
-                "$SRC/systemd/envlog-backup.timer" /etc/systemd/system/
+                "$SRC/systemd/envlog-backup.timer" \
+                "$SRC/systemd/envlog-outdoor.service" \
+                "$SRC/systemd/envlog-outdoor.timer" /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable envlog.service envlog-backup.timer
+# The outdoor timer is enabled even with no coordinates set: the fetcher exits
+# 0 and says so, and enabling it now means setting ENVLOG_LAT/ENVLOG_LON later
+# needs no reinstall and no remembering that this step exists.
+systemctl enable envlog.service envlog-backup.timer envlog-outdoor.timer
 # restart, not `enable --now`: --now starts a stopped unit but leaves a running
 # one alone, so on an upgrade the new app.py would sit on disk while the old
 # code kept serving from memory -- and the check below would call that success.
 systemctl restart envlog.service
 systemctl start envlog-backup.timer
+systemctl start envlog-outdoor.timer
 
 sleep 2
 if systemctl is-active --quiet envlog.service; then
@@ -127,3 +133,16 @@ for ip in $(hostname -I); do
   log "dashboard: http://$ip:$port/"
 done
 log "next: set ENVLOG_BACKUP_DEST in $CONF_DIR/backup.conf"
+# Printed unconditionally rather than only on a fresh install: the outdoor
+# reference is off by default and an upgrade is exactly when someone would
+# want to turn it on, but the token file is never rewritten so the hint cannot
+# live in it.
+if grep -q '^ENVLOG_LAT=' "$CONF_DIR/envlog.env" 2>/dev/null; then
+  log "outdoor reference: configured"
+else
+  log "outdoor reference: off. To enable, add your coordinates (2 decimals is"
+  log "  plenty -- the model grid is kilometres wide) to $CONF_DIR/envlog.env:"
+  log "    ENVLOG_LAT=40.71"
+  log "    ENVLOG_LON=-74.01"
+  log "  then: systemctl start envlog-outdoor.service"
+fi

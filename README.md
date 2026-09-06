@@ -213,4 +213,9 @@ Stated up front, because most of these are deliberate.
 - **The Pi runs an unsupported OS.** Raspbian Buster stopped getting security updates in 2024,
   and its package archive has already moved once. Bounded — the service is LAN-only behind a
   shared token — but see [docs/deployment.md](docs/deployment.md#if-this-box-is-ever-re-imaged).
+- **The outdoor reference is a model, not a sensor.** Open-Meteo serves a numerical forecast on a
+  grid of several kilometres, so the dashed lines are the trend over your neighbourhood, not your
+  street. When one disagrees with a thermometer outside your window, the thermometer is right.
+  It is off until you set coordinates, and there is no outdoor CO₂ in it — the air-quality model
+  carries carbon *monoxide*, a different gas.
 - **Single node.** The schema supports several, but nothing has been tested with more than one.

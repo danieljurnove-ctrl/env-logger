@@ -508,3 +508,72 @@ missing that is what left a desktop-width canvas overflowing a 390px viewport th
 
 Still unbuilt: selecting a window by dragging on the main chart, so "compare last Tuesday's
 dinner to tonight's" is a couple of taps rather than four datetime fields.
+
+### Outdoor reference
+
+Every indoor number was unanchored. PM2.5 of 40 could be the kitchen or a wildfire two states
+away, and nothing in the archive could tell the two apart — which makes the question the
+[Purpose](#purpose) section asks, *is this room's air bad*, unanswerable by construction. An
+hourly outdoor series fixes that for the cost of one timer.
+
+**Source: Open-Meteo.** No API key and no account, which is why it was chosen over AirNow,
+PurpleAir and OpenWeatherMap — a key is a credential to store on the Pi, rotate, and lose. Two
+endpoints: weather for temperature, humidity and pressure, air quality for PM2.5, PM10 and the
+US AQI.
+
+**It is a model, not a sensor, and the docs say so in three places.** Open-Meteo serves a
+numerical forecast on a grid of several kilometres. It is the trend over a neighbourhood. When
+it disagrees with a thermometer outside the window, the thermometer is right. Said plainly
+because the failure mode otherwise is someone concluding their BME280 is miscalibrated.
+
+**No outdoor CO₂.** The air-quality model carries carbon *monoxide*, a different gas, and pairing
+the two would be a units-grade error dressed as a feature. `OUTDOOR_FOR` omits `co2_ppm`
+deliberately, and the decay fit's 420 ppm baseline stays an assumption about the global
+background rather than something measured. Particle counts are omitted for the same reason: the
+model reports mass concentration, not counts per 0.1 L.
+
+**Its own table, keyed on `ts` alone.** Outdoor is outdoor — unlike `readings` it is not
+per-node. Location resolves for readings by range join; the outdoor row for an hour is the same
+row whichever room the node was in.
+
+**Upserted, not `DO NOTHING`** — the opposite of `readings`, and the one place the two diverge.
+The upstream revises recent hours as observations replace forecasts, so re-fetching an hour
+already held is a correction to take rather than a duplicate to drop. Each hourly run re-requests
+the last two days, so a missed run heals on the next one. The `SET` clause is `COALESCE`d against
+the stored value, so an endpoint that is down during a revision cannot erase columns an earlier
+run already filled.
+
+**Future hours are dropped.** Both endpoints return forecast hours past now; storing them would
+put predictions in the same column as observations with nothing afterwards to tell them apart.
+
+**Coordinates never enter the repository.** They are a home address. They live in
+`/etc/envlog/envlog.env` (root-owned, `0600`) beside the token, and the fetcher rounds them to
+two decimals — about a kilometre — before sending. The model's grid is coarser than that, so the
+rounding costs no accuracy and hands a third party a blunter fix than it asked for.
+
+**Off by default, timer enabled anyway.** With no coordinates the fetch prints one line and exits
+0. Enabling the timer unconditionally means turning the feature on later is two lines in a config
+file rather than a reinstall nobody will remember is needed.
+
+**Step-held on the charts, and only for two hours.** An hourly figure is a claim about that hour;
+interpolating between two of them would draw readings nobody modelled. Holding it forever would
+be worse — a dead fetcher would look like flat calm weather — so the line stops two hours after
+the last point it has, and the header calls out a newest hour older than three.
+
+**A verification gap, stated rather than hidden.** The environment this was written in has no
+route to `open-meteo.com`, so the variable names are the documented ones but were never seen in a
+live response. `_hourly_series` therefore treats a name the upstream does not return as an empty
+column rather than an error: a wrong name shows up as a blank line on a chart, not as an hourly
+unit going red every hour forever. `fetch_outdoor.py --dry-run` on the Pi is what closes the gap,
+and `pi/README.md` says to run it once before trusting the timer.
+
+### Status LED
+
+The button had no local confirmation: the marker appeared on the dashboard within a minute, but
+at the moment of pressing, a press that reached the Pi and a press that came back 401 looked
+identical. The onboard NeoPixel on GPIO0 answers it — green for a 201, a longer red for anything
+else, including no WiFi. Red is longer as well as differently coloured, because red/green is the
+most common form of colour blindness.
+
+Only the button blinks. Readings post every 45 seconds, and a node that blinks for those is a
+light flashing all night in a bedroom.
