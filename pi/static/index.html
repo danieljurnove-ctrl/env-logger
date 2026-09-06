@@ -172,25 +172,51 @@ function bucketSeconds() {
    uPlot leaves a gap wherever y is null, which is what makes a move break the
    line instead of drawing a slope between two rooms that never happened.
 
-   A null goes in for a run of empty buckets too. Readings stop whenever WiFi or
-   Pi-hole does, and those gaps are accepted by design -- but drawing a straight
-   line across one states that the room did nothing in between, which is the same
-   lie as drawing a slope across a move. The threshold is deliberately loose:
-   buckets are aligned, so a present run steps by exactly one bucket, and at the
-   6h range (60s buckets against a 45s cadence) a bucket lands empty as a matter
-   of routine. Only three or more consecutive empty buckets break the line. */
+   Two things happen per segment before that.
+
+   First, rows where none of this chart's metrics have a value are dropped. A
+   bucket exists if ANY metric landed in it, so a PM sensor sampling every five
+   minutes against a 45-second cadence is null in most rows -- and those nulls
+   are not outages, they are simply the shape of a slower sensor. Left in, they
+   isolate every PM sample between two gaps and the series can never draw a line
+   at all, only dots.
+
+   Second, what remains breaks on a real outage: a run with no readings at all.
+   The threshold scales with whichever is coarser, the bucket or this metric's
+   own observed spacing, so a 5-minute sensor is judged against five minutes
+   rather than against the chart's bucket. Three and a half of those, so that
+   ordinary jitter -- a 45-second cadence against 60-second buckets leaves one
+   empty routinely -- never breaks the line. */
 function toData(segments, wanted, columns) {
   const idx = wanted.map(m => columns.indexOf(m));
-  const xs = [], ys = wanted.map(() => []);
-  const step = bucketSeconds();
+  const has = row => idx.some(c => c >= 0 && row[c] != null);
+
+  const kept = segments.map(seg => seg.rows.filter(has));
+
+  // Spacing of the points this chart actually has, so a slow sensor is judged
+  // against its own cadence rather than a fast one's bucket size.
+  //
+  // The lower quartile, not the median: outages only ever add large deltas, and
+  // a quartile ignores them where a mean would be dragged upward by the very
+  // gaps it is meant to detect. And only with enough deltas to mean anything --
+  // from two points you cannot infer a cadence at all, and the one delta
+  // between them would be its own justification for not breaking.
+  const deltas = [];
+  for (const rows of kept)
+    for (let i = 1; i < rows.length; i++) deltas.push(rows[i][0] - rows[i - 1][0]);
+  deltas.sort((a, b) => a - b);
+  const cadence = deltas.length >= 4 ? deltas[Math.floor(deltas.length * 0.25)] : 0;
+  const step = Math.max(bucketSeconds(), cadence);
   const maxGap = step * 3.5;
-  segments.forEach((seg, i) => {
-    if (i > 0 && seg.rows.length) {
-      xs.push(seg.rows[0][0] - 0.5);
+
+  const xs = [], ys = wanted.map(() => []);
+  kept.forEach((rows, i) => {
+    if (i > 0 && rows.length) {
+      xs.push(rows[0][0] - 0.5);
       ys.forEach(a => a.push(null));
     }
     let prev = null;
-    for (const row of seg.rows) {
+    for (const row of rows) {
       if (prev !== null && row[0] - prev > maxGap) {
         xs.push(prev + step / 2);
         ys.forEach(a => a.push(null));

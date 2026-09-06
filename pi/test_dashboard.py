@@ -60,6 +60,24 @@ range = { bucket: "day" };
 check("1y consecutive days", nulls(toData([seg([[0,500],[86400,510]])], ["co2_ppm"], cols)[1]), 0);
 check("1y multi-day gap", nulls(toData([seg([[0,500],[432000,510]])], ["co2_ppm"], cols)[1]), 1);
 
+// A slow sensor shares its buckets with fast ones, so most rows hold null for
+// it. Those nulls are its cadence, not an outage: left in, every sample is
+// isolated between two gaps and the series draws as dots with no line.
+const pmCols = ["ts", "pm2_5_atm", "co2_ppm"];
+// PM every 300s, CO2 every 60s, on a 60s-bucket range.
+const mixed = [];
+for (let t = 0; t <= 1200; t += 60) mixed.push([t, t % 300 === 0 ? 5 : null, 400]);
+range = { bucket: "60" };
+const pmData = toData([seg(mixed)], ["pm2_5_atm"], pmCols);
+check("slow sensor draws a line, not dots", nulls(pmData[1]), 0);
+check("slow sensor keeps only its own points", pmData[0].length, 5);
+// The fast metric on the same rows is unaffected.
+check("fast sensor keeps every point", toData([seg(mixed)], ["co2_ppm"], pmCols)[0].length, 21);
+// A real outage still breaks it: 300s cadence, so >1050s of nothing.
+const pmGap = [[0,5],[300,5],[600,5],[2400,5],[2700,5]].map(r => [r[0], r[1], 400]);
+check("slow sensor still breaks on a real outage",
+      nulls(toData([seg(pmGap)], ["pm2_5_atm"], pmCols)[1]), 1);
+
 process.exit(failures);
 """
 
