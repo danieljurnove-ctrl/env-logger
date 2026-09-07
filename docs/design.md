@@ -467,6 +467,29 @@ Two windows, picked from the placement list and then adjustable. Both are re-bas
 **seconds elapsed since their own start** — that is what lets two different stretches of clock
 time overlay on one axis at all.
 
+**B always runs as long as A, and its end is derived rather than entered.** Two windows of
+different lengths overlay two different questions: the shorter series stops partway across and
+the empty remainder reads as data when it is only the end of the window. "Was tonight's cooking
+worse than last night's" is a question about two comparable stretches, so the interface does not
+make the incomparable case expressible. A is the reference because A is also the window the decay
+fit reads. A placement picked for B contributes its start; its own length is ignored.
+
+**Both sides are binned onto one x grid built client-side**, and this is not optional. `uPlot`
+takes a single x array, and the obvious approach — take whatever elapsed offsets each side
+produced and union them — cannot work: `/api/series` buckets on the absolute epoch grid, so
+subtracting each window's own start shifts the two sides by `(aFrom − bFrom) mod bucket`. Unless
+that is zero the offsets interleave and never coincide, and each side ends up present at every
+other position, drawn as isolated points that read as a broken renderer rather than as data that
+never lined up. Measured on 36 h of readings with B starting an hour after A: 475 x positions,
+241 per side, **7** in common.
+
+Equal lengths do not rescue that on their own — they only equalise the bucket width, which was
+the second half of the same bug. With equal 24-hour windows and a 360-second bucket, a start
+offset of 3600 s or 1800 s lines up perfectly and one of 1237 s, 900 s or 60 s gives **zero**
+positions in common. So the grid is built explicitly — one bucket off the span, slots at
+`k · bucket` — and both sides are binned onto it by nearest slot. An empty slot stays null, so a
+real outage still breaks both lines rather than being filled in.
+
 Stats come from `/api/compare` over **raw rows**, not from the bucketed chart data. A p95 of
 bucket averages is not a p95, and the tail is exactly where PM questions live. The response also
 reports which rooms each window covers, because a window that straddles a move is comparing a

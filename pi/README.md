@@ -146,6 +146,11 @@ It shows liveness in the header, a room timeline with the settling period hatche
 a move control, and an editable placement history. Moves appear as dashed vertical rules on every
 chart and break the line, so a trend is never drawn across two different rooms.
 
+**Compare** overlays two windows. Set A's start and end; B takes a start and **runs as long as
+A**, its end shown derived rather than typed — two windows of different lengths overlay two
+different questions, and the shorter one stopping partway across reads as data rather than as the
+end of the window.
+
 **Markers** annotate what you did. Type a label, press *Place on a chart…*, then click any chart
 at the moment it happened; the marker draws as a solid magenta rule on all six charts, labelled.
 Arming is deliberate rather than a bare click, because uPlot already uses drag-on-a-chart to zoom
