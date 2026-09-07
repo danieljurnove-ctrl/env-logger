@@ -76,6 +76,11 @@
   @media (min-width:720px) { .cmp-sides { grid-template-columns:minmax(0,1fr) minmax(0,1fr) } }
   .cmp-side { border:1px solid var(--line); border-radius:6px; padding:8px }
   .cmp-side input { min-width:0; flex:1 }
+  /* Dashed, dim, and not an input: B's end is derived, and it should be
+     obvious at a glance that there is nothing to type here. */
+  .derived { flex:1; min-width:0; display:flex; align-items:center;
+    padding:6px 8px; border:1px dashed var(--line); border-radius:6px;
+    color:var(--dim); font-size:12px }
   .fit { margin-top:10px; padding:8px 10px; border-radius:6px; background:#0d1015;
          border:1px solid var(--line); font-size:13px }
   .fit .caveat { color:var(--dim); font-size:12px; display:block; margin-top:4px }
@@ -154,7 +159,7 @@
     <div class="row">
       <select id="cmpMetric"></select>
       <button id="cmpRun">Compare</button>
-      <span class="hint">Pick a placement to fill a side, then adjust the times.</span>
+      <span class="hint">Pick a placement to fill a side. B always runs as long as A.</span>
     </div>
     <div class="cmp-sides">
       <div class="cmp-side">
@@ -166,7 +171,9 @@
       <div class="cmp-side">
         <div class="row"><strong>B</strong> <select class="cmp-pick" data-side="b"></select></div>
         <div class="row">
-          <input type="datetime-local" id="bFrom"><input type="datetime-local" id="bTo">
+          <input type="datetime-local" id="bFrom">
+          <!-- Derived, never entered. See syncCompareWindows. -->
+          <span class="derived" id="bTo">set A&rsquo;s range first</span>
         </div>
       </div>
     </div>
@@ -783,6 +790,40 @@ const epochOf = (id) => {
   return v ? Math.floor(new Date(v).getTime()/1000) : null;
 };
 
+/* B runs as long as A, and its end is derived rather than entered.
+
+   Two windows of different lengths overlay two different questions: the
+   shorter series simply stops partway across and the eye reads the empty
+   remainder as data, when it is only the end of the window. "Was tonight's
+   cooking worse than last night's" is a question about two comparable
+   stretches, so the interface should not make the incomparable case
+   expressible in the first place.
+
+   A is the reference because A is also the window the decay fit reads.
+
+   Not merely cosmetic, either: with the two spans equal the bucket width is
+   equal too, which is one of the two things compareSeries needs to put both
+   sides on one grid. It is not a substitute for the other -- a start offset
+   that is not a whole number of buckets misaligns them however equal the
+   lengths -- so compareSeries still bins onto a grid it builds itself. */
+function compareLength() {
+  const from = epochOf("aFrom"), to = epochOf("aTo");
+  return (from != null && to != null && to > from) ? to - from : null;
+}
+
+function compareBTo() {
+  const from = epochOf("bFrom"), length = compareLength();
+  return (from != null && length != null) ? from + length : null;
+}
+
+function syncCompareWindows() {
+  const length = compareLength(), end = compareBTo();
+  $("bTo").textContent =
+    length == null ? "set A\u2019s range first"
+    : end == null ? `set B\u2019s start \u2014 ${duration(length)} to match A`
+    : `${new Date(end*1000).toLocaleString()} \u00b7 ${duration(length)}`;
+}
+
 function fillComparePickers(placements) {
   const opts = '<option value="">— pick a placement —</option>' + placements.map(p => {
     const end = p.end_ts || Math.floor(Date.now()/1000);
@@ -814,12 +855,31 @@ function statsTable(res, metricLabel) {
 }
 
 /* Both windows are re-based to seconds-since-their-own-start, which is what
-   makes two different stretches of clock time overlay at all. */
+   makes two different stretches of clock time overlay at all.
+
+   The x grid is built here and both sides are binned onto it. Taking the union
+   of whatever elapsed offsets each side happened to produce does NOT work, and
+   the way it fails looks like a rendering bug rather than a data one:
+
+     - /api/series buckets on the absolute epoch grid, so a bucket lands on a
+       multiple of `bucket` seconds. Subtracting each window's own `from` then
+       shifts the two sides by (aFrom - bFrom) mod bucket, and unless that is
+       zero their offsets interleave and never coincide.
+     - Worse, the bucket width was derived per side from each side's own span,
+       so two windows of different lengths were binned at different widths.
+
+   Together those gave a union x of ~475 positions with each side present at
+   241 of them and both present at 7 -- two interleaved combs drawn as isolated
+   points, which is what a "broken chart" of full-looking data was. */
 async function compareSeries(metric, aFrom, aTo, bFrom, bTo) {
+  // ONE bucket for both sides, off the longer span: the grid has to be the
+  // same on both sides or nothing lines up.
+  const span = Math.max(aTo - aFrom, bTo - bFrom);
+  const bucket = Math.max(1, Math.round(span / 240));
+
   const fetchOne = async (from, to) => {
-    const span = to - from;
-    const bucket = String(Math.max(1, Math.round(span / 240)));
-    const q = new URLSearchParams({ metrics: metric, from, to, bucket, tz: TZ });
+    const q = new URLSearchParams({
+      metrics: metric, from, to, bucket: String(bucket), tz: TZ });
     const s = await api(`/api/series?${q}`);
     const pts = [];
     for (const seg of s.segments) for (const row of seg.rows) {
@@ -828,10 +888,22 @@ async function compareSeries(metric, aFrom, aTo, bFrom, bTo) {
     return pts;
   };
   const [a, b] = await Promise.all([fetchOne(aFrom, aTo), fetchOne(bFrom, bTo)]);
-  // uPlot needs one shared x, so merge the elapsed offsets from both sides.
-  const xs = [...new Set([...a.map(p => p[0]), ...b.map(p => p[0])])].sort((m, n) => m - n);
-  const lookup = (pts) => { const m = new Map(pts); return xs.map(x => m.has(x) ? m.get(x) : null); };
-  return [xs, lookup(a), lookup(b)];
+
+  const slots = Math.floor(span / bucket) + 1;
+  const xs = Array.from({ length: slots }, (_, k) => k * bucket);
+  /* Nearest slot, averaging any collision. Server buckets arrive `bucket`
+     apart so two of them cannot land in one slot, but averaging rather than
+     overwriting means that stops being a silent assumption. An empty slot
+     stays null, so a genuine gap in the readings is still a gap in the line. */
+  const bin = (pts) => {
+    const sum = new Float64Array(slots), count = new Int32Array(slots);
+    for (const [elapsed, value] of pts) {
+      const k = Math.round(elapsed / bucket);
+      if (k >= 0 && k < slots) { sum[k] += value; count[k]++; }
+    }
+    return Array.from({ length: slots }, (_, k) => count[k] ? sum[k] / count[k] : null);
+  };
+  return [xs, bin(a), bin(b)];
 }
 
 function drawCompare(data) {
@@ -881,14 +953,16 @@ async function runDecay(metric, from, to) {
 async function runCompare() {
   const metric = $("cmpMetric").value;
   const label = (CMP_METRICS.find(m => m[0] === metric) || [,metric])[1];
-  const [aFrom, aTo, bFrom, bTo] =
-    [epochOf("aFrom"), epochOf("aTo"), epochOf("bFrom"), epochOf("bTo")];
-  if ([aFrom, aTo, bFrom, bTo].some(v => v == null)) {
-    say($("cmpMsg"), "Both windows need a start and an end.", "err"); return;
+  const aFrom = epochOf("aFrom"), aTo = epochOf("aTo"), bFrom = epochOf("bFrom");
+  if (aFrom == null || aTo == null || bFrom == null) {
+    say($("cmpMsg"), "A needs a start and an end; B needs a start.", "err"); return;
   }
-  if (aFrom >= aTo || bFrom >= bTo) {
-    say($("cmpMsg"), "Each window must start before it ends.", "err"); return;
+  if (aTo <= aFrom) {
+    say($("cmpMsg"), "Window A must start before it ends.", "err"); return;
   }
+  // Derived, so B cannot be a different length than A and there is no second
+  // start-before-end check to get wrong.
+  const bTo = bFrom + (aTo - aFrom);
   $("cmpRun").disabled = true;
   try {
     const q = new URLSearchParams({
@@ -1037,9 +1111,16 @@ document.querySelectorAll(".cmp-pick").forEach(sel => {
     const [from, to] = sel.value.split(",").map(Number);
     const side = sel.dataset.side;
     $(`${side}From`).value = localInput(from);
-    $(`${side}To`).value = localInput(to);
+    // Only A carries an end. A placement picked for B contributes its start;
+    // its own length is deliberately ignored, because matching A is the point.
+    if (side === "a") $("aTo").value = localInput(to);
+    syncCompareWindows();
   });
 });
+
+["aFrom", "aTo", "bFrom"].forEach(id =>
+  $(id).addEventListener("input", syncCompareWindows));
+syncCompareWindows();
 
 $("cmpRun").addEventListener("click", () => { runCompare(); });
 
