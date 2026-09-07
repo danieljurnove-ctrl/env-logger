@@ -27,6 +27,10 @@ INDEX = os.path.join(HERE, "static", "index.html")
 START = "function bucketSeconds()"
 END = "/* The null gap between placements is one bucket wide"
 
+# The compare view's own extraction, for the same reason.
+CMP_START = "async function compareSeries("
+CMP_END = "function drawCompare("
+
 HARNESS = """
 const cols = ["ts", "co2_ppm"];
 const seg = rows => ({ rows });
@@ -84,12 +88,91 @@ process.exit(failures);
 """
 
 
-def _extract() -> str:
+CMP_HARNESS = """
+let failures = 0;
+function check(name, got, want) {
+  if (JSON.stringify(got) !== JSON.stringify(want)) {
+    console.log(`FAIL ${name}: got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`);
+    failures++;
+  }
+}
+
+const TZ = "UTC";
+/* A stand-in for /api/series: buckets on the ABSOLUTE epoch grid, exactly as
+   the real endpoint does. That detail is the whole point -- align to `from`
+   instead and the bug under test cannot reproduce. */
+let cadence = 45, hole = null;
+async function api(url) {
+  const q = new URLSearchParams(url.split("?")[1]);
+  const from = +q.get("from"), to = +q.get("to"), bucket = +q.get("bucket");
+  const rows = [];
+  for (let ts = from; ts < to; ts += cadence) {
+    if (hole && ts >= hole[0] && ts <= hole[1]) continue;
+    const b = Math.floor(ts / bucket) * bucket;
+    if (!rows.length || rows[rows.length - 1][0] !== b) rows.push([b, 100 + (ts % 600)]);
+  }
+  return { segments: [{ rows }] };
+}
+
+const paired = ([xs, a, b]) => {
+  let both = 0;
+  for (let i = 0; i < xs.length; i++) if (a[i] != null && b[i] != null) both++;
+  return both;
+};
+const nulls = (s) => s.filter(v => v == null).length;
+
+(async () => {
+  const LO = 1788633126, SPAN = 36 * 3600;
+
+  /* THE REGRESSION. Windows offset by an hour: /api/series buckets on the
+     absolute epoch grid, so subtracting each window's own `from` shifts the two
+     sides by (aFrom - bFrom) mod bucket. Union the resulting offsets and the
+     sides interleave -- 475 x positions, 241 per side, 7 in common, drawn as
+     isolated points that look like a broken renderer rather than bad data. */
+  const offset = await compareSeries("co2_ppm", LO, LO + SPAN, LO + 3600, LO + SPAN);
+  check("offset windows share one x grid", offset[1].length === offset[0].length &&
+        offset[2].length === offset[0].length, true);
+  check("offset windows overlap almost everywhere", paired(offset) > offset[0].length * 0.9, true);
+
+  /* And with a start offset that is deliberately NOT a whole number of
+     minutes, so nothing lines up by luck. */
+  const odd = await compareSeries("co2_ppm", LO, LO + SPAN, LO + 1237, LO + SPAN);
+  check("an awkward offset still overlaps", paired(odd) > odd[0].length * 0.9, true);
+
+  /* Windows of DIFFERENT lengths. The bucket width used to be derived per side
+     from each side's own span, so two spans meant two grid widths. */
+  const uneven = await compareSeries("co2_ppm", LO, LO + SPAN, LO, LO + SPAN / 2);
+  check("uneven windows share one x grid",
+        uneven[1].length === uneven[0].length && uneven[2].length === uneven[0].length, true);
+  /* The longer side fills the grid bar the final slot, which sits at exactly
+     elapsed == span and no reading ever lands on it (the window is half-open).
+     The shorter side stops around halfway, which is the point. */
+  check("the longer side fills the grid", nulls(uneven[1]) <= 1, true);
+  check("the shorter side stops around halfway",
+        nulls(uneven[2]) > uneven[0].length * 0.4, true);
+
+  /* A real outage must still break the line -- the fix must not paper over
+     missing data by filling every slot. */
+  hole = [LO + 12 * 3600, LO + 15 * 3600];
+  const gap = await compareSeries("co2_ppm", LO, LO + SPAN, LO + 3600, LO + SPAN);
+  check("a real outage still breaks both lines", nulls(gap[1]) > 5 && nulls(gap[2]) > 5, true);
+  hole = null;
+
+  process.exit(failures);
+})();
+"""
+
+
+def _slice(start: str, end: str) -> str:
     with open(INDEX, encoding="utf-8") as fh:
         src = fh.read()
-    assert START in src, f"marker {START!r} not found in index.html"
-    assert END in src, f"marker {END!r} not found in index.html"
-    return src[src.index(START) : src.index(END)]
+    assert start in src, f"marker {start!r} not found in index.html"
+    assert end in src, f"marker {end!r} not found in index.html"
+    return src[src.index(start) : src.index(end)]
+
+
+def _extract() -> str:
+    return _slice(START, END)
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
@@ -101,6 +184,30 @@ def test_charts_break_on_outages_but_tolerate_bucket_jitter(tmp_path):
     """
     script = tmp_path / "todata.js"
     script.write_text("let range;\n" + _extract() + textwrap.dedent(HARNESS), encoding="utf-8")
+    result = subprocess.run(
+        ["node", str(script)], capture_output=True, text=True, timeout=60
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_compare_puts_both_windows_on_one_x_grid(tmp_path):
+    """Both compare series must land on the same x positions.
+
+    They did not, and the way it failed was invisible to every check that had
+    been run: the stats table was right, the API was right, the row counts were
+    right, and the chart drew two interleaved combs as isolated points -- which
+    reads as a rendering bug rather than as data that never lined up.
+
+    /api/series buckets on the absolute epoch grid, so subtracting each
+    window's own start shifts the two sides by (aFrom - bFrom) mod bucket; and
+    the bucket width itself was derived per side from each side's own span.
+    Either alone is enough to guarantee they never coincide.
+    """
+    script = tmp_path / "compare.js"
+    script.write_text(
+        _slice(CMP_START, CMP_END) + textwrap.dedent(CMP_HARNESS), encoding="utf-8"
+    )
     result = subprocess.run(
         ["node", str(script)], capture_output=True, text=True, timeout=60
     )

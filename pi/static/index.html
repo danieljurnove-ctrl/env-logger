@@ -814,12 +814,31 @@ function statsTable(res, metricLabel) {
 }
 
 /* Both windows are re-based to seconds-since-their-own-start, which is what
-   makes two different stretches of clock time overlay at all. */
+   makes two different stretches of clock time overlay at all.
+
+   The x grid is built here and both sides are binned onto it. Taking the union
+   of whatever elapsed offsets each side happened to produce does NOT work, and
+   the way it fails looks like a rendering bug rather than a data one:
+
+     - /api/series buckets on the absolute epoch grid, so a bucket lands on a
+       multiple of `bucket` seconds. Subtracting each window's own `from` then
+       shifts the two sides by (aFrom - bFrom) mod bucket, and unless that is
+       zero their offsets interleave and never coincide.
+     - Worse, the bucket width was derived per side from each side's own span,
+       so two windows of different lengths were binned at different widths.
+
+   Together those gave a union x of ~475 positions with each side present at
+   241 of them and both present at 7 -- two interleaved combs drawn as isolated
+   points, which is what a "broken chart" of full-looking data was. */
 async function compareSeries(metric, aFrom, aTo, bFrom, bTo) {
+  // ONE bucket for both sides, off the longer span: the grid has to be the
+  // same on both sides or nothing lines up.
+  const span = Math.max(aTo - aFrom, bTo - bFrom);
+  const bucket = Math.max(1, Math.round(span / 240));
+
   const fetchOne = async (from, to) => {
-    const span = to - from;
-    const bucket = String(Math.max(1, Math.round(span / 240)));
-    const q = new URLSearchParams({ metrics: metric, from, to, bucket, tz: TZ });
+    const q = new URLSearchParams({
+      metrics: metric, from, to, bucket: String(bucket), tz: TZ });
     const s = await api(`/api/series?${q}`);
     const pts = [];
     for (const seg of s.segments) for (const row of seg.rows) {
@@ -828,10 +847,22 @@ async function compareSeries(metric, aFrom, aTo, bFrom, bTo) {
     return pts;
   };
   const [a, b] = await Promise.all([fetchOne(aFrom, aTo), fetchOne(bFrom, bTo)]);
-  // uPlot needs one shared x, so merge the elapsed offsets from both sides.
-  const xs = [...new Set([...a.map(p => p[0]), ...b.map(p => p[0])])].sort((m, n) => m - n);
-  const lookup = (pts) => { const m = new Map(pts); return xs.map(x => m.has(x) ? m.get(x) : null); };
-  return [xs, lookup(a), lookup(b)];
+
+  const slots = Math.floor(span / bucket) + 1;
+  const xs = Array.from({ length: slots }, (_, k) => k * bucket);
+  /* Nearest slot, averaging any collision. Server buckets arrive `bucket`
+     apart so two of them cannot land in one slot, but averaging rather than
+     overwriting means that stops being a silent assumption. An empty slot
+     stays null, so a genuine gap in the readings is still a gap in the line. */
+  const bin = (pts) => {
+    const sum = new Float64Array(slots), count = new Int32Array(slots);
+    for (const [elapsed, value] of pts) {
+      const k = Math.round(elapsed / bucket);
+      if (k >= 0 && k < slots) { sum[k] += value; count[k]++; }
+    }
+    return Array.from({ length: slots }, (_, k) => count[k] ? sum[k] / count[k] : null);
+  };
+  return [xs, bin(a), bin(b)];
 }
 
 function drawCompare(data) {
