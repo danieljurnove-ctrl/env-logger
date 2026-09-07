@@ -154,11 +154,16 @@ label field autocompletes from every marker you have ever made, so "opened windo
 acquire a second spelling. Misplaced ones are editable and deletable in the history table below.
 
 **The outdoor reference** draws as a dashed line in the same hue as the indoor series it answers,
-on the temperature, humidity, pressure and PM charts. It is step-held between hourly points
-rather than interpolated — an hourly figure is a claim about that hour, and a slope between two
-of them would be invented — and it stops after two hours without new data instead of running on
-flat, so a dead fetcher looks like a dead fetcher. The header says so too, once the newest hour
-is more than three hours old.
+on the temperature, humidity, pressure and PM charts. It is drawn straight between hourly
+samples: Open-Meteo serves all six of these as *instantaneous* values at the stated timestamp
+— only accumulations like rainfall are period-aggregated — so a step would claim the temperature
+held flat for an hour and then jumped, which outdoor air does not do.
+
+Two hours apart is the limit. Beyond that the line breaks rather than ramping smoothly across
+hours nobody modelled, so one missed hourly run is bridged and a real outage stays visible. There
+is no extrapolation past either end, which leaves the line up to an hour short of the right edge
+— that is what "hourly" costs and what it should look like. The header calls it out once the
+newest hour is more than three hours old.
 
 CO₂ has no outdoor line: the upstream air-quality model carries carbon *monoxide*, a different
 gas. The decay fit's 420 ppm is still an assumption, not a measurement.

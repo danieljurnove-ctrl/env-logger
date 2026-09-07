@@ -555,10 +555,20 @@ rounding costs no accuracy and hands a third party a blunter fix than it asked f
 0. Enabling the timer unconditionally means turning the feature on later is two lines in a config
 file rather than a reinstall nobody will remember is needed.
 
-**Step-held on the charts, and only for two hours.** An hourly figure is a claim about that hour;
-interpolating between two of them would draw readings nobody modelled. Holding it forever would
-be worse — a dead fetcher would look like flat calm weather — so the line stops two hours after
-the last point it has, and the header calls out a newest hour older than three.
+**Interpolated on the charts, and this reverses an earlier decision.** These were step-held
+first, reasoning that an hourly figure is a claim about its whole hour and that a slope between
+two would draw readings nobody modelled. That reasoning is sound and applies to none of the
+variables here: Open-Meteo returns temperature, humidity, pressure, PM and AQI as *instantaneous*
+values at the stated timestamp, with only sums and means such as rainfall aggregated over a
+period. Against instantaneous samples a step is the stronger claim, not the more cautious one —
+it asserts the value held flat for an hour and then jumped, which outdoor air does not do — so a
+straight line between two point samples of a continuous field is the more honest reading, and it
+also happens to be the one that looks like weather.
+
+Two hours is the limit on a bridge: one missed hourly run is spanned, a real outage breaks the
+line rather than becoming a smooth ramp across hours nobody modelled. Neither end extrapolates,
+so the line stops at the last sample — up to an hour short of the right edge, which is what
+hourly data costs and should look like. The header calls out a newest hour older than three.
 
 **The upstream contract was verified separately, on the Pi.** It could not be checked where this
 was built — no route to `open-meteo.com` from there — so the tests run against a local stand-in

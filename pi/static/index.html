@@ -219,10 +219,11 @@ const OUTDOOR_LABELS = {
   temp_c: "outside", rh_pct: "outside", pressure_hpa: "outside",
   pm2_5_atm: "PM2.5 outside", pm10_atm: "PM10 outside",
 };
-/* Hourly values are step-held, but only for so long. Past this the fetcher has
-   stopped and the honest picture is the line ending, not a flat extrapolation
-   that looks like calm weather. Two hours: one full gap tolerated, no more. */
-const OUTDOOR_MAX_HOLD = 2 * 3600;
+/* The furthest apart two outdoor samples may be and still have a line drawn
+   between them. One missed hourly run is bridged; a real outage stays a
+   visible gap rather than becoming a smooth ramp across hours nobody
+   modelled. */
+const OUTDOOR_MAX_GAP = 2 * 3600;
 /* Warn in the header past three hours -- two missed hourly runs. */
 const OUTDOOR_STALE_AFTER = 3 * 3600;
 // Deliberately outside BAND_COLOURS: a marker must not read as a placement.
@@ -413,27 +414,49 @@ function markerClicks(u) {
 
 /* Project the hourly outdoor column onto this chart's x values.
 
-   Step-held, not interpolated: an hourly figure is a claim about that hour,
-   and drawing a slope between two of them would invent readings nobody
-   modelled. Held for OUTDOOR_MAX_HOLD at most, so a dead fetcher shows up as
-   the line stopping rather than as a flat line that reads like real weather.
+   Linearly interpolated between samples, and this is a correction: these were
+   step-held first, on the reasoning that an hourly figure is a claim about
+   its whole hour and a slope between two would invent readings. That is true
+   of accumulated variables like rainfall. It is not true of any variable this
+   fetches -- Open-Meteo serves temperature, humidity, pressure, PM and AQI as
+   INSTANTANEOUS values at the stated timestamp, only sums and means being
+   period-aggregated. A step therefore made the stronger claim, not the weaker
+   one: that the temperature held flat for an hour and then jumped, which is
+   the one thing outdoor air demonstrably does not do. A straight line between
+   two point samples of a continuous field is the honest reading of them.
 
-   `rows` is ordered by ts and `xs` ascends, so the cursor only ever moves
-   forward -- one pass, not a scan per point. */
+   No extrapolation at either end: before the first sample and after the last
+   there is nothing to interpolate between, so the line simply starts and
+   stops. In practice that leaves it up to an hour short of the right edge,
+   which is what "hourly" costs and should look like.
+
+   `rows` is ordered by ts and `xs` ascends, so the cursor only moves forward
+   -- one pass, not a scan per point. */
 function outdoorColumn(outdoor, column, xs, transform) {
   const idx = outdoor.columns.indexOf(column);
-  const rows = outdoor.rows;
-  if (idx < 0 || !rows.length) return xs.map(() => null);
   const out = new Array(xs.length).fill(null);
+  if (idx < 0) return out;
+
+  /* Only hours that actually carry this column. A null is the absence of a
+     sample, not a sample of zero, and treating it as a point would drag the
+     line to the floor. Dropping it instead lets the two hours either side
+     bridge, subject to the gap limit below. */
+  const pts = [];
+  for (const row of outdoor.rows) if (row[idx] != null) pts.push([row[0], row[idx]]);
+  if (!pts.length) return out;
+
   let j = 0;
   for (let i = 0; i < xs.length; i++) {
-    while (j + 1 < rows.length && rows[j+1][0] <= xs[i]) j++;
-    if (rows[j][0] > xs[i]) continue;              // before the first hour
-    let v = rows[j][idx];
-    if (v == null || xs[i] - rows[j][0] > OUTDOOR_MAX_HOLD) continue;
-    out[i] = transform ? transform(v) : v;
+    const x = xs[i];
+    while (j + 1 < pts.length && pts[j+1][0] <= x) j++;
+    const a = pts[j], b = pts[j + 1];
+    if (x < a[0]) continue;                        // before the first sample
+    if (x === a[0]) { out[i] = a[1]; continue; }
+    if (!b) continue;                              // after the last sample
+    if (b[0] - a[0] > OUTDOOR_MAX_GAP) continue;   // an outage stays a gap
+    out[i] = a[1] + (b[1] - a[1]) * ((x - a[0]) / (b[0] - a[0]));
   }
-  return out;
+  return transform ? out.map(v => v == null ? null : transform(v)) : out;
 }
 
 /* Which outdoor columns this chart should draw, deduped and paired with the
